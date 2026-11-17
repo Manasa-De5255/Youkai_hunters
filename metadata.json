@@ -1,0 +1,6 @@
+{
+  "name": "Yokai Hunters",
+  "description": "Dark fantasy 3D character selection and customization portal for Yokai Hunters, featuring individual player accounts, gender selection, and real-time 3D warrior customization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
