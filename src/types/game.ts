@@ -71,10 +71,30 @@ export interface CharacterCustomization {
   skinTone: SkinToneId;
 }
 
+export type ActivityId = 'archery' | 'sword_combat' | 'superpower_burst';
+
+export type GadgetId =
+  | 'archery_bow'
+  | 'hunter_blade'
+  | 'spirit_talisman'
+  | 'yokai_radar'
+  | 'spirit_beam';
+
+export interface KodamaChallengeProgress {
+  diamonds: number;
+  completedRounds: number[];
+  stage2Unlocked: boolean;
+}
+
 export interface PlayerAccount {
   playerId: string;
   username: string;
   gender: Gender;
+  level: number;
+  xp: number;
+  orbsCleared: number;
+  unlockedItems: string[];
+  kodamaProgress: KodamaChallengeProgress;
   recoveryQuestion: string;
   maleCustomization: CharacterCustomization;
   femaleCustomization: CharacterCustomization;

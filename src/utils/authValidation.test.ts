@@ -2,17 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   validatePasswordResetInput,
+  validatePlayerId,
   validateRegistrationInput,
   validateUsername,
 } from './authValidation';
 
-test('validateUsername enforces length and allowed characters', () => {
+test('validateUsername and validatePlayerId enforce length and allowed characters', () => {
   assert.equal(validateUsername('ab').valid, false);
   assert.equal(validateUsername('Kenshin_01').valid, true);
   assert.equal(validateUsername('bad name!').valid, false);
+
+  assert.equal(validatePlayerId('A').valid, false);
+  assert.equal(validatePlayerId('YH-9901').valid, true);
+  assert.equal(validatePlayerId('HUNTER_7').valid, true);
+  assert.equal(validatePlayerId('bad id!').valid, false);
 });
 
-test('validateRegistrationInput catches mismatched passwords and missing gender', () => {
+test('validateRegistrationInput catches mismatched passwords, invalid playerId, and missing gender', () => {
   const mismatch = validateRegistrationInput({
     username: 'Kenshin',
     password: 'password123',
@@ -21,6 +27,16 @@ test('validateRegistrationInput catches mismatched passwords and missing gender'
     recoveryAnswer: 'fox',
   });
   assert.equal(mismatch.valid, false);
+
+  const badPid = validateRegistrationInput({
+    username: 'Kenshin',
+    playerId: 'X',
+    password: 'password123',
+    confirmPassword: 'password123',
+    gender: 'male',
+    recoveryAnswer: 'fox',
+  });
+  assert.equal(badPid.valid, false);
 
   const noGender = validateRegistrationInput({
     username: 'Kenshin',
@@ -33,6 +49,7 @@ test('validateRegistrationInput catches mismatched passwords and missing gender'
 
   const valid = validateRegistrationInput({
     username: 'Kenshin',
+    playerId: 'YH-KENSHIN-1',
     password: 'password123',
     confirmPassword: 'password123',
     gender: 'male',

@@ -55,6 +55,10 @@ export default function GenderSelectionScreen({
           <span className="font-mono-id text-cyan-300">{player.playerId}</span>
           <span aria-hidden="true">·</span>
           <span className="font-semibold text-white">{player.username}</span>
+          <span aria-hidden="true">·</span>
+          <span className="font-mono-id text-amber-300">
+            Lv.{player.level} ({player.xp} XP)
+          </span>
         </div>
         <button
           type="button"

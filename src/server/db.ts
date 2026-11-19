@@ -4,10 +4,23 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import {
   getDefaultCustomization,
-  sanitizeCustomization,
 } from '../data/customizationCatalog';
-import { CharacterCustomization, Gender, PlayerAccount } from '../types/game';
 import {
+  ACTIVITY_DEFINITIONS,
+  enforceCustomizationProgression,
+  findLockedCustomizationError,
+  getLevelFromXp,
+  getUnlockedItemsForLevel,
+  isActivityUnlocked,
+} from '../data/progressionCatalog';
+import {
+  applyRoundCompletion,
+  KODAMA_TOTAL_ROUNDS,
+  sanitizeKodamaProgress,
+} from '../data/kodamaChallenge';
+import { ActivityId, CharacterCustomization, Gender, PlayerAccount } from '../types/game';
+import {
+  normalizePlayerId,
   normalizeUsername,
   validatePasswordResetInput,
   validateRegistrationInput,
@@ -36,16 +49,48 @@ function hashToken(token: string): string {
 interface PlayerRow {
   id: number;
   player_id: string;
+  player_id_lower?: string | null;
   username: string;
   username_lower: string;
   password_hash: string;
   recovery_question: string;
   recovery_answer_hash: string;
   gender: Gender;
+  level?: number;
+  xp?: number;
+  orbs_cleared?: number;
+  unlocked_items?: string;
+  diamonds?: number;
+  kodama_completed_rounds?: string;
+  stage2_unlocked?: number;
   male_customization: string;
   female_customization: string;
   created_at: string;
   updated_at: string;
+}
+
+function parseUnlockedItems(raw: string | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === 'string')
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseCompletedRounds(raw: string | undefined): number[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is number => typeof item === 'number')
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 function rowToPlayerAccount(row: PlayerRow): PlayerAccount {
@@ -62,13 +107,33 @@ function rowToPlayerAccount(row: PlayerRow): PlayerAccount {
     parsedFemale = {};
   }
 
+  const xp = Math.max(0, Math.floor(Number(row.xp ?? 0)));
+  const level = Math.max(1, getLevelFromXp(xp), Math.floor(Number(row.level ?? 1)));
+  const orbsCleared = Math.max(0, Math.floor(Number(row.orbs_cleared ?? 0)));
+  const unlockedItems = getUnlockedItemsForLevel(level, parseUnlockedItems(row.unlocked_items));
+  const kodamaProgress = sanitizeKodamaProgress({
+    diamonds: row.diamonds ?? 0,
+    completedRounds: parseCompletedRounds(row.kodama_completed_rounds),
+    stage2Unlocked: Boolean(row.stage2_unlocked),
+  });
+
   return {
     playerId: row.player_id,
     username: row.username,
     gender: row.gender,
+    level,
+    xp,
+    orbsCleared,
+    unlockedItems,
+    kodamaProgress,
     recoveryQuestion: row.recovery_question,
-    maleCustomization: sanitizeCustomization(parsedMale, 'male'),
-    femaleCustomization: sanitizeCustomization(parsedFemale, 'female'),
+    maleCustomization: enforceCustomizationProgression(parsedMale, 'male', level, unlockedItems),
+    femaleCustomization: enforceCustomizationProgression(
+      parsedFemale,
+      'female',
+      level,
+      unlockedItems,
+    ),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -93,12 +158,20 @@ export class YokaiDatabase {
       CREATE TABLE IF NOT EXISTS players (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         player_id TEXT NOT NULL UNIQUE,
+        player_id_lower TEXT,
         username TEXT NOT NULL,
         username_lower TEXT NOT NULL UNIQUE,
         password_hash TEXT NOT NULL,
         recovery_question TEXT NOT NULL,
         recovery_answer_hash TEXT NOT NULL,
         gender TEXT NOT NULL CHECK(gender IN ('male', 'female')),
+        level INTEGER NOT NULL DEFAULT 1,
+        xp INTEGER NOT NULL DEFAULT 0,
+        orbs_cleared INTEGER NOT NULL DEFAULT 0,
+        unlocked_items TEXT NOT NULL DEFAULT '[]',
+        diamonds INTEGER NOT NULL DEFAULT 0,
+        kodama_completed_rounds TEXT NOT NULL DEFAULT '[]',
+        stage2_unlocked INTEGER NOT NULL DEFAULT 0,
         male_customization TEXT NOT NULL,
         female_customization TEXT NOT NULL,
         created_at TEXT NOT NULL,
@@ -112,6 +185,46 @@ export class YokaiDatabase {
         expires_at TEXT NOT NULL
       );
     `);
+
+    const columns = this.db.prepare('PRAGMA table_info(players)').all() as { name: string }[];
+    const colNames = new Set(columns.map((c) => c.name));
+
+    if (!colNames.has('player_id_lower')) {
+      this.db.exec('ALTER TABLE players ADD COLUMN player_id_lower TEXT;');
+    }
+    if (!colNames.has('level')) {
+      this.db.exec('ALTER TABLE players ADD COLUMN level INTEGER NOT NULL DEFAULT 1;');
+    }
+    if (!colNames.has('xp')) {
+      this.db.exec('ALTER TABLE players ADD COLUMN xp INTEGER NOT NULL DEFAULT 0;');
+    }
+    if (!colNames.has('orbs_cleared')) {
+      this.db.exec('ALTER TABLE players ADD COLUMN orbs_cleared INTEGER NOT NULL DEFAULT 0;');
+    }
+    if (!colNames.has('unlocked_items')) {
+      this.db.exec("ALTER TABLE players ADD COLUMN unlocked_items TEXT NOT NULL DEFAULT '[]';");
+    }
+    if (!colNames.has('diamonds')) {
+      this.db.exec('ALTER TABLE players ADD COLUMN diamonds INTEGER NOT NULL DEFAULT 0;');
+    }
+    if (!colNames.has('kodama_completed_rounds')) {
+      this.db.exec(
+        "ALTER TABLE players ADD COLUMN kodama_completed_rounds TEXT NOT NULL DEFAULT '[]';",
+      );
+    }
+    if (!colNames.has('stage2_unlocked')) {
+      this.db.exec('ALTER TABLE players ADD COLUMN stage2_unlocked INTEGER NOT NULL DEFAULT 0;');
+    }
+
+    this.db.exec(`
+      UPDATE players
+      SET player_id_lower = LOWER(TRIM(player_id))
+      WHERE player_id_lower IS NULL OR player_id_lower = '';
+    `);
+
+    this.db.exec(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_players_player_id_lower ON players(player_id_lower);',
+    );
   }
 
   close(): void {
@@ -120,14 +233,19 @@ export class YokaiDatabase {
 
   registerPlayer(input: {
     username: string;
+    playerId?: string;
     password: string;
     confirmPassword: string;
     gender: Gender;
     recoveryQuestion?: string;
     recoveryAnswer: string;
-  }): { ok: true; player: PlayerAccount; sessionToken: string } | { ok: false; error: string; status: number } {
+  }):
+    | { ok: true; player: PlayerAccount; sessionToken: string }
+    | { ok: false; error: string; status: number } {
+    const requestedPlayerId = input.playerId ? normalizePlayerId(input.playerId) : '';
     const validation = validateRegistrationInput({
       username: input.username,
+      playerId: requestedPlayerId || undefined,
       password: input.password,
       confirmPassword: input.confirmPassword,
       gender: input.gender,
@@ -140,15 +258,31 @@ export class YokaiDatabase {
     const username = normalizeUsername(input.username);
     const usernameLower = username.toLowerCase();
 
-    const existing = this.db
+    const existingUsername = this.db
       .prepare('SELECT player_id FROM players WHERE username_lower = ?')
       .get(usernameLower);
-    if (existing) {
+    if (existingUsername) {
       return {
         ok: false,
         error: 'That username is already claimed by another hunter. Choose a unique username.',
         status: 409,
       };
+    }
+
+    if (requestedPlayerId) {
+      const requestedLower = requestedPlayerId.toLowerCase();
+      const existingPlayerId = this.db
+        .prepare(
+          'SELECT player_id FROM players WHERE player_id_lower = ? OR LOWER(TRIM(player_id)) = ?',
+        )
+        .get(requestedLower, requestedLower);
+      if (existingPlayerId) {
+        return {
+          ok: false,
+          error: 'That Player ID is already registered to another hunter. Choose a unique Player ID.',
+          status: 409,
+        };
+      }
     }
 
     const now = new Date().toISOString();
@@ -160,34 +294,58 @@ export class YokaiDatabase {
     const recoveryAnswerHash = hashSecret(input.recoveryAnswer.trim().toLowerCase());
     const maleJson = JSON.stringify(getDefaultCustomization('male'));
     const femaleJson = JSON.stringify(getDefaultCustomization('female'));
+    const starterUnlockedJson = JSON.stringify(getUnlockedItemsForLevel(1));
 
     const tempId = `YH-PENDING-${crypto.randomUUID()}`;
     const insert = this.db.prepare(`
       INSERT INTO players (
-        player_id, username, username_lower, password_hash,
+        player_id, player_id_lower, username, username_lower, password_hash,
         recovery_question, recovery_answer_hash, gender,
+        level, xp, orbs_cleared, unlocked_items,
         male_customization, female_customization, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const tx = this.db.transaction(() => {
+      const initialId = requestedPlayerId || tempId;
       const info = insert.run(
-        tempId,
+        initialId,
+        initialId.toLowerCase(),
         username,
         usernameLower,
         passwordHash,
         recoveryQuestion,
         recoveryAnswerHash,
         input.gender,
+        1,
+        0,
+        0,
+        starterUnlockedJson,
         maleJson,
         femaleJson,
         now,
         now,
       );
+
+      if (requestedPlayerId) {
+        return requestedPlayerId;
+      }
+
       const numericId = Number(info.lastInsertRowid);
-      const playerId = `YH-${String(10000 + numericId)}`;
-      this.db.prepare('UPDATE players SET player_id = ? WHERE id = ?').run(playerId, numericId);
-      return playerId;
+      let candidateNum = 10000 + numericId;
+      let assignedId = `YH-${candidateNum}`;
+      while (
+        this.db
+          .prepare('SELECT 1 FROM players WHERE player_id_lower = ?')
+          .get(assignedId.toLowerCase())
+      ) {
+        candidateNum += 1;
+        assignedId = `YH-${candidateNum}`;
+      }
+      this.db
+        .prepare('UPDATE players SET player_id = ?, player_id_lower = ? WHERE id = ?')
+        .run(assignedId, assignedId.toLowerCase(), numericId);
+      return assignedId;
     });
 
     const playerId = tx();
@@ -201,26 +359,61 @@ export class YokaiDatabase {
 
   loginPlayer(input: {
     username: string;
-    password: string;
-  }): { ok: true; player: PlayerAccount; sessionToken: string } | { ok: false; error: string; status: number } {
-    const usernameLower = normalizeUsername(input.username).toLowerCase();
-    if (!usernameLower || !input.password) {
-      return { ok: false, error: 'Username and password are required.', status: 400 };
+    playerId?: string;
+    password?: string;
+  }):
+    | { ok: true; player: PlayerAccount; sessionToken: string }
+    | { ok: false; error: string; status: number } {
+    const usernameLower = normalizeUsername(input.username ?? '').toLowerCase();
+    const cleanPlayerId = normalizePlayerId(input.playerId ?? '');
+    const cleanPassword = typeof input.password === 'string' ? input.password : '';
+
+    if (!usernameLower || (!cleanPlayerId && !cleanPassword)) {
+      return {
+        ok: false,
+        error: 'Enter your username along with your Player ID or password.',
+        status: 400,
+      };
     }
 
-    const row = this.db
+    const row = (this.db
       .prepare('SELECT * FROM players WHERE username_lower = ?')
-      .get(usernameLower) as PlayerRow | undefined;
+      .get(usernameLower) ??
+      this.db
+        .prepare('SELECT * FROM players WHERE LOWER(TRIM(username)) = ?')
+        .get(usernameLower)) as PlayerRow | undefined;
 
-    if (!row || !verifySecret(input.password, row.password_hash)) {
-      return { ok: false, error: 'Invalid username or password.', status: 401 };
+    if (!row) {
+      return {
+        ok: false,
+        error: 'No hunter account found with those credentials.',
+        status: 401,
+      };
+    }
+
+    if (cleanPlayerId && row.player_id.trim().toLowerCase() !== cleanPlayerId.toLowerCase()) {
+      return {
+        ok: false,
+        error: 'Player ID does not match the registered hunter username.',
+        status: 401,
+      };
+    }
+
+    if (cleanPassword && !verifySecret(cleanPassword, row.password_hash)) {
+      return {
+        ok: false,
+        error: 'Invalid username or password.',
+        status: 401,
+      };
     }
 
     const sessionToken = this.createSession(row.player_id);
     return { ok: true, player: rowToPlayerAccount(row), sessionToken };
   }
 
-  getRecoveryQuestion(username: string): { ok: true; question: string } | { ok: false; error: string; status: number } {
+  getRecoveryQuestion(
+    username: string,
+  ): { ok: true; question: string } | { ok: false; error: string; status: number } {
     const usernameLower = normalizeUsername(username).toLowerCase();
     if (!usernameLower) {
       return { ok: false, error: 'Enter your username first.', status: 400 };
@@ -321,18 +514,245 @@ export class YokaiDatabase {
     playerId: string,
     gender: Gender,
     customization: Partial<CharacterCustomization>,
-  ): PlayerAccount | null {
-    if (gender !== 'male' && gender !== 'female') return null;
-    const clean = sanitizeCustomization(customization, gender);
+  ):
+    | { ok: true; player: PlayerAccount }
+    | { ok: false; error: string; status: number } {
+    if (gender !== 'male' && gender !== 'female') {
+      return { ok: false, error: 'Invalid gender category.', status: 400 };
+    }
+    if (!customization || typeof customization !== 'object') {
+      return { ok: false, error: 'Invalid customization payload.', status: 400 };
+    }
+
+    const row = this.db
+      .prepare('SELECT * FROM players WHERE player_id = ?')
+      .get(playerId) as PlayerRow | undefined;
+    if (!row) {
+      return { ok: false, error: 'Player account not found.', status: 404 };
+    }
+
+    const account = rowToPlayerAccount(row);
+    const currentCustom =
+      gender === 'male' ? account.maleCustomization : account.femaleCustomization;
+
+    const lockedError = findLockedCustomizationError(
+      customization,
+      currentCustom,
+      account.level,
+      account.unlockedItems,
+    );
+    if (lockedError) {
+      return { ok: false, error: lockedError, status: 403 };
+    }
+
+    const clean = enforceCustomizationProgression(
+      customization,
+      gender,
+      account.level,
+      account.unlockedItems,
+    );
     const now = new Date().toISOString();
     const col = gender === 'male' ? 'male_customization' : 'female_customization';
     this.db
       .prepare(`UPDATE players SET gender = ?, ${col} = ?, updated_at = ? WHERE player_id = ?`)
       .run(gender, JSON.stringify(clean), now, playerId);
 
+    const updated = this.db
+      .prepare('SELECT * FROM players WHERE player_id = ?')
+      .get(playerId) as PlayerRow;
+    return { ok: true, player: rowToPlayerAccount(updated) };
+  }
+
+  recordActivityProgress(
+    playerId: string,
+    activityId: ActivityId,
+  ):
+    | {
+        ok: true;
+        player: PlayerAccount;
+        leveledUp: boolean;
+        newlyUnlocked: string[];
+      }
+    | { ok: false; error: string; status: number } {
+    const activity = ACTIVITY_DEFINITIONS.find((a) => a.id === activityId);
+    if (!activity) {
+      return { ok: false, error: 'Unknown gameplay activity.', status: 400 };
+    }
+
     const row = this.db
       .prepare('SELECT * FROM players WHERE player_id = ?')
       .get(playerId) as PlayerRow | undefined;
-    return row ? rowToPlayerAccount(row) : null;
+    if (!row) {
+      return { ok: false, error: 'Player account not found.', status: 404 };
+    }
+
+    const currentXp = Math.max(0, Math.floor(Number(row.xp ?? 0)));
+    const currentLevel = Math.max(1, getLevelFromXp(currentXp), Math.floor(Number(row.level ?? 1)));
+
+    if (!isActivityUnlocked(currentLevel, activityId)) {
+      return {
+        ok: false,
+        error: `${activity.name} is locked. Unlock at Level ${activity.requiredLevel}.`,
+        status: 403,
+      };
+    }
+
+    const existingUnlocked = getUnlockedItemsForLevel(
+      currentLevel,
+      parseUnlockedItems(row.unlocked_items),
+    );
+    const nextXp = currentXp + activity.xpPerHit;
+    const nextLevel = Math.max(currentLevel, getLevelFromXp(nextXp));
+    const nextOrbsCleared = Math.max(0, Math.floor(Number(row.orbs_cleared ?? 0))) + 1;
+    const nextUnlocked = getUnlockedItemsForLevel(nextLevel, existingUnlocked);
+
+    const existingSet = new Set(existingUnlocked);
+    const newlyUnlocked = nextUnlocked.filter((item) => !existingSet.has(item));
+    const leveledUp = nextLevel > currentLevel;
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(
+        `UPDATE players
+         SET level = ?, xp = ?, orbs_cleared = ?, unlocked_items = ?, updated_at = ?
+         WHERE player_id = ?`,
+      )
+      .run(nextLevel, nextXp, nextOrbsCleared, JSON.stringify(nextUnlocked), now, playerId);
+
+    const updated = this.db
+      .prepare('SELECT * FROM players WHERE player_id = ?')
+      .get(playerId) as PlayerRow;
+    return {
+      ok: true,
+      player: rowToPlayerAccount(updated),
+      leveledUp,
+      newlyUnlocked,
+    };
+  }
+
+  awardKodamaHit(playerId: string):
+    | {
+        ok: true;
+        player: PlayerAccount;
+        leveledUp: boolean;
+        newlyUnlocked: string[];
+      }
+    | { ok: false; error: string; status: number } {
+    const archeryDef = ACTIVITY_DEFINITIONS.find((a) => a.id === 'archery')!;
+    const row = this.db
+      .prepare('SELECT * FROM players WHERE player_id = ?')
+      .get(playerId) as PlayerRow | undefined;
+    if (!row) {
+      return { ok: false, error: 'Player account not found.', status: 404 };
+    }
+
+    const currentXp = Math.max(0, Math.floor(Number(row.xp ?? 0)));
+    const currentLevel = Math.max(1, getLevelFromXp(currentXp), Math.floor(Number(row.level ?? 1)));
+    const existingUnlocked = getUnlockedItemsForLevel(
+      currentLevel,
+      parseUnlockedItems(row.unlocked_items),
+    );
+    const nextXp = currentXp + archeryDef.xpPerHit;
+    const nextLevel = Math.max(currentLevel, getLevelFromXp(nextXp));
+    const nextOrbsCleared = Math.max(0, Math.floor(Number(row.orbs_cleared ?? 0))) + 1;
+    const nextDiamonds = Math.max(0, Math.floor(Number(row.diamonds ?? 0))) + 1;
+    const nextUnlocked = getUnlockedItemsForLevel(nextLevel, existingUnlocked);
+
+    const existingSet = new Set(existingUnlocked);
+    const newlyUnlocked = nextUnlocked.filter((item) => !existingSet.has(item));
+    const leveledUp = nextLevel > currentLevel;
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(
+        `UPDATE players
+         SET level = ?, xp = ?, orbs_cleared = ?, unlocked_items = ?, diamonds = ?, updated_at = ?
+         WHERE player_id = ?`,
+      )
+      .run(
+        nextLevel,
+        nextXp,
+        nextOrbsCleared,
+        JSON.stringify(nextUnlocked),
+        nextDiamonds,
+        now,
+        playerId,
+      );
+
+    const updated = this.db
+      .prepare('SELECT * FROM players WHERE player_id = ?')
+      .get(playerId) as PlayerRow;
+    return {
+      ok: true,
+      player: rowToPlayerAccount(updated),
+      leveledUp,
+      newlyUnlocked,
+    };
+  }
+
+  completeKodamaRound(
+    playerId: string,
+    round: number,
+    hits: number,
+  ):
+    | {
+        ok: true;
+        player: PlayerAccount;
+        passed: boolean;
+        newlyCompleted: boolean;
+        stage2JustUnlocked: boolean;
+      }
+    | { ok: false; error: string; status: number } {
+    if (
+      typeof round !== 'number' ||
+      !Number.isFinite(round) ||
+      round < 1 ||
+      round > KODAMA_TOTAL_ROUNDS
+    ) {
+      return { ok: false, error: 'Invalid Kodama challenge round.', status: 400 };
+    }
+    if (typeof hits !== 'number' || !Number.isFinite(hits) || hits < 0) {
+      return { ok: false, error: 'Invalid hit count.', status: 400 };
+    }
+
+    const row = this.db
+      .prepare('SELECT * FROM players WHERE player_id = ?')
+      .get(playerId) as PlayerRow | undefined;
+    if (!row) {
+      return { ok: false, error: 'Player account not found.', status: 404 };
+    }
+
+    const currentProgress = sanitizeKodamaProgress({
+      diamonds: row.diamonds ?? 0,
+      completedRounds: parseCompletedRounds(row.kodama_completed_rounds),
+      stage2Unlocked: Boolean(row.stage2_unlocked),
+    });
+
+    const outcome = applyRoundCompletion(currentProgress, Math.floor(round), Math.floor(hits));
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(
+        `UPDATE players
+         SET kodama_completed_rounds = ?, stage2_unlocked = ?, updated_at = ?
+         WHERE player_id = ?`,
+      )
+      .run(
+        JSON.stringify(outcome.progress.completedRounds),
+        outcome.progress.stage2Unlocked ? 1 : 0,
+        now,
+        playerId,
+      );
+
+    const updated = this.db
+      .prepare('SELECT * FROM players WHERE player_id = ?')
+      .get(playerId) as PlayerRow;
+    return {
+      ok: true,
+      player: rowToPlayerAccount(updated),
+      passed: outcome.passed,
+      newlyCompleted: outcome.newlyCompleted,
+      stage2JustUnlocked: outcome.stage2JustUnlocked,
+    };
   }
 }

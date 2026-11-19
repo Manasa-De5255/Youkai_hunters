@@ -61,6 +61,8 @@ export const UPLOADED_ASSETS = {
   customizationBg: '/assets/aistudio/Yokai_Hunters_Warrior___16_Nov_2026__9.29_pm_367f5ae5.png',
   maleCharacter: '/assets/aistudio/Yokai_Hunters_Warrior_MALE___16_Nov_2026__9.22_pm_d89229ad.png',
   femaleCharacter: '/assets/aistudio/Yokai_Hunters_Warrior__FEMALE__16_Nov_2026__9.24_pm_83697a22.png',
+  kodamaGhost: '/assets/aistudio/Kodama__pm_fad8014a.png',
+  grassWallBg: '/assets/aistudio/green_wall_a29742ee.png',
 } as const;
 
 export const CUSTOMIZATION_CATEGORIES: {

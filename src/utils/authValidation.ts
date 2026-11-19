@@ -17,6 +17,24 @@ export function normalizeUsername(raw: string): string {
   return raw.trim();
 }
 
+export function normalizePlayerId(raw: string): string {
+  return raw.trim();
+}
+
+export function validatePlayerId(raw: string): ValidationResult {
+  const pid = normalizePlayerId(raw);
+  if (pid.length < 2 || pid.length > 24) {
+    return { valid: false, error: 'Player ID must be between 2 and 24 characters.' };
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(pid)) {
+    return {
+      valid: false,
+      error: 'Player ID may only contain letters, numbers, underscores, and hyphens.',
+    };
+  }
+  return { valid: true };
+}
+
 export function validateUsername(raw: string): ValidationResult {
   const username = normalizeUsername(raw);
   if (username.length < 3 || username.length > 24) {
@@ -41,9 +59,16 @@ export function validatePassword(password: string): ValidationResult {
   return { valid: true };
 }
 
-export function validateRegistrationInput(input: RegistrationValidationInput): ValidationResult {
+export function validateRegistrationInput(
+  input: RegistrationValidationInput & { playerId?: string },
+): ValidationResult {
   const userCheck = validateUsername(input.username);
   if (!userCheck.valid) return userCheck;
+
+  if (input.playerId && normalizePlayerId(input.playerId).length > 0) {
+    const pidCheck = validatePlayerId(input.playerId);
+    if (!pidCheck.valid) return pidCheck;
+  }
 
   const passCheck = validatePassword(input.password);
   if (!passCheck.valid) return passCheck;

@@ -88,9 +88,16 @@ export class WarriorCharacter3D {
     this.attackTimer = 0.65;
   }
 
-  public rebuild(gender: Gender, custom: CharacterCustomization): void {
+  public rebuild(
+    gender: Gender,
+    custom: CharacterCustomization,
+    options?: { playerLevel?: number },
+  ): void {
     this.clearCurrentCharacter();
 
+    const playerLevel = options?.playerLevel ?? 1;
+    const hasSword = playerLevel >= 2;
+    const hasSuperpower = playerLevel >= 3;
     const isMale = gender === 'male';
     const costume = COSTUME_OPTIONS.find((c) => c.id === custom.costume) ?? COSTUME_OPTIONS[0];
     const hairColorOpt =
@@ -534,17 +541,19 @@ export class WarriorCharacter3D {
 
       // Weapon attachments: Right hand (-1 or +1: in character space +X is character's left, -X is character's right!)
       if (side === -1) {
-        // Character's RIGHT hand -> Equipped Sword angled cleanly outward-down
-        const swordMesh = this.buildSwordMesh(custom.sword);
-        swordMesh.position.set(0, -0.015, 0.02);
-        swordMesh.rotation.set(Math.PI * 0.45, 0, -0.2);
-        handGroup.add(swordMesh);
+        // Character's RIGHT hand -> Equipped Sword unlocked at Level 2+
+        if (hasSword) {
+          const swordMesh = this.buildSwordMesh(custom.sword);
+          swordMesh.position.set(0, -0.015, 0.02);
+          swordMesh.rotation.set(Math.PI * 0.45, 0, -0.2);
+          handGroup.add(swordMesh);
+        }
         armGroup.rotation.z = -0.22;
         armGroup.rotation.x = -0.14;
         forearmGroup.rotation.x = -0.22;
         this.anim.rightArmGroup = armGroup;
       } else {
-        // Character's LEFT hand -> Equipped Bow angled cleanly along left side
+        // Character's LEFT hand -> Equipped Bow unlocked at Level 1+
         const bowMesh = this.buildBowMesh(custom.archery);
         bowMesh.position.set(0.025, -0.01, 0.02);
         bowMesh.rotation.set(0.14, -Math.PI * 0.08, -0.18);
@@ -637,8 +646,10 @@ export class WarriorCharacter3D {
     torsoGroup.add(headGroup);
     this.characterContainer.add(torsoGroup);
 
-    // 6. SUPERPOWER MAGICAL ENERGY VFX & SANCTUARY GROUND SIGIL
-    this.buildSuperpowerVfx(custom.superpower, superpowerOpt.primaryHex, superpowerOpt.secondaryHex);
+    // 6. SUPERPOWER MAGICAL ENERGY VFX & SANCTUARY GROUND SIGIL (unlocked at Level 3+)
+    if (hasSuperpower) {
+      this.buildSuperpowerVfx(custom.superpower, superpowerOpt.primaryHex, superpowerOpt.secondaryHex);
+    }
   }
 
   private buildHairAndCrown(

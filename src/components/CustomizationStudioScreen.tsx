@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { BookOpen, LogOut, RotateCcw, RotateCw, Users, Play } from 'lucide-react';
+import { BookOpen, Lock, LogOut, Play, RotateCcw, RotateCw, Users } from 'lucide-react';
 import {
   ARCHERY_OPTIONS,
   COSTUME_OPTIONS,
@@ -11,6 +11,14 @@ import {
   SWORD_OPTIONS,
   UPLOADED_ASSETS,
 } from '../data/customizationCatalog';
+import {
+  CATEGORY_UNLOCK_LEVELS,
+  getLevelTitle,
+  getNextLevelThreshold,
+  getRequiredLevelForItem,
+  isCategoryUnlocked,
+  isItemUnlocked,
+} from '../data/progressionCatalog';
 import CharacterStageCanvas from '../three/CharacterStageCanvas';
 import {
   CharacterCustomization,
@@ -36,7 +44,9 @@ export default function CustomizationStudioScreen({
   onSaveAndStartGame,
   onLogout,
 }: CustomizationStudioScreenProps) {
-  const [activeCategory, setActiveCategory] = useState<CustomizationCategoryKey>('costume');
+  const [activeCategory, setActiveCategory] = useState<CustomizationCategoryKey>(
+    player.level >= 2 ? 'costume' : 'archery',
+  );
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [flourishSignal, setFlourishSignal] = useState(0);
   const [resetViewSignal, setResetViewSignal] = useState(0);
@@ -44,11 +54,25 @@ export default function CustomizationStudioScreen({
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  const propToItemType = {
+    costume: 'costume',
+    hairStyle: 'hairStyle',
+    hairColor: 'hairColor',
+    sword: 'sword',
+    archery: 'archery',
+    superpower: 'superpower',
+    skinTone: 'skinTone',
+  } as const;
+
   const updateField = <K extends keyof CharacterCustomization>(
     key: K,
     value: CharacterCustomization[K],
     triggerFlourish = false,
   ) => {
+    const itemType = propToItemType[key];
+    if (!isItemUnlocked(player.level, player.unlockedItems, itemType, String(value))) {
+      return;
+    }
     onChangeCustomization({
       ...customization,
       [key]: value,
@@ -80,6 +104,22 @@ export default function CustomizationStudioScreen({
   };
 
   const activeCategoryMeta = CUSTOMIZATION_CATEGORIES.find((c) => c.key === activeCategory)!;
+  const nextThreshold = getNextLevelThreshold(player.level);
+  const currentThresholdMin =
+    player.level === 1 ? 0 : getNextLevelThreshold(player.level - 1)?.minXp ?? 0;
+  const xpProgressPct = nextThreshold
+    ? Math.min(
+        100,
+        Math.max(
+          0,
+          Math.round(
+            ((player.xp - currentThresholdMin) /
+              Math.max(1, nextThreshold.minXp - currentThresholdMin)) *
+              100,
+          ),
+        ),
+      )
+    : 100;
 
   return (
     <main className="relative h-screen w-screen overflow-hidden bg-[#06040a] text-slate-100 select-none">
@@ -101,6 +141,7 @@ export default function CustomizationStudioScreen({
         <CharacterStageCanvas
           gender={player.gender}
           customization={customization}
+          playerLevel={player.level}
           flourishSignal={flourishSignal}
           resetViewSignal={resetViewSignal}
           rotateStepSignal={rotateStepSignal}
@@ -148,7 +189,29 @@ export default function CustomizationStudioScreen({
                 {player.gender}
               </dd>
             </div>
+            <div className="flex items-center justify-between">
+              <dt className="text-slate-400">Level</dt>
+              <dd data-testid="hud-level" className="font-mono-id font-semibold text-amber-300">
+                Lv.{player.level} · {getLevelTitle(player.level)}
+              </dd>
+            </div>
           </dl>
+
+          {/* XP Progression Bar */}
+          <div className="mt-2.5">
+            <div className="mb-1 flex items-center justify-between text-[10px] text-slate-400">
+              <span>Progression XP</span>
+              <span className="font-mono-id text-cyan-200">
+                {nextThreshold ? `${player.xp} / ${nextThreshold.minXp} XP` : `${player.xp} XP (MAX)`}
+              </span>
+            </div>
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-cyan-400 to-amber-400 transition-all duration-300"
+                style={{ width: `${xpProgressPct}%` }}
+              />
+            </div>
+          </div>
 
           <button
             type="button"
@@ -169,7 +232,7 @@ export default function CustomizationStudioScreen({
           <ul className="mt-2.5 space-y-1.5 text-[11px] leading-relaxed text-slate-300">
             <li>1. Drag across the warrior to rotate 360° and inspect details.</li>
             <li>2. Scroll the mouse wheel to zoom closer or wider.</li>
-            <li>3. Click any icon on the right rail to swap costume, hair, weapons, skin tone, or powers live.</li>
+            <li>3. At Level 1, Archery gear is unlocked. Earn XP in the Sanctuary to unlock Level 2+ blades, armor, and powers.</li>
             <li>4. Click START GAME at bottom right to save and enter the realm.</li>
           </ul>
         </div>
@@ -220,34 +283,55 @@ export default function CustomizationStudioScreen({
           <section
             aria-label={`${activeCategoryMeta.label} customization options`}
             data-testid={`panel-${activeCategory}`}
-            className="pointer-events-auto flex max-h-[calc(100vh-128px)] w-[296px] flex-col rounded-xl border border-cyan-400/28 bg-[#060b18]/90 shadow-[0_16px_44px_rgba(0,0,0,0.75)]"
+            className="pointer-events-auto flex max-h-[calc(100vh-128px)] w-[304px] flex-col rounded-xl border border-cyan-400/28 bg-[#060b18]/90 shadow-[0_16px_44px_rgba(0,0,0,0.75)]"
           >
             <div className="border-b border-cyan-500/20 px-4 py-3">
               <h2 className="font-display text-sm font-bold tracking-wider text-white">
                 {activeCategoryMeta.label}
               </h2>
               <p className="mt-0.5 text-[11px] text-slate-400">{activeCategoryMeta.shortDesc}</p>
+              {!isCategoryUnlocked(player.level, activeCategory) && (
+                <div className="mt-1.5 inline-flex items-center gap-1 rounded border border-amber-500/40 bg-amber-950/60 px-2 py-0.5 text-[10px] font-semibold text-amber-200">
+                  <Lock className="h-3 w-3" aria-hidden="true" />
+                  Unlock at Level {CATEGORY_UNLOCK_LEVELS[activeCategory]}
+                </div>
+              )}
             </div>
 
             <div className="flex-1 space-y-2 overflow-y-auto p-3 yh-scroll">
               {activeCategory === 'costume' &&
                 COSTUME_OPTIONS.map((opt) => {
                   const selected = customization.costume === opt.id;
+                  const unlocked = isItemUnlocked(
+                    player.level,
+                    player.unlockedItems,
+                    'costume',
+                    opt.id,
+                  );
+                  const reqLevel = getRequiredLevelForItem('costume', opt.id);
                   return (
                     <button
                       key={opt.id}
                       type="button"
+                      disabled={!unlocked}
+                      aria-disabled={!unlocked}
                       onClick={() => updateField('costume', opt.id)}
                       aria-pressed={selected}
+                      data-testid={`option-costume-${opt.id}`}
                       className={`w-full rounded-lg border p-2.5 text-left transition ${
-                        selected
-                          ? 'border-cyan-400 bg-cyan-950/55 shadow-[0_0_16px_rgba(34,211,238,0.18)]'
-                          : 'border-slate-700/70 bg-[#0b1326]/90 hover:border-cyan-400/40'
+                        !unlocked
+                          ? 'cursor-not-allowed border-slate-800/90 bg-[#080d1b]/75 opacity-65'
+                          : selected
+                            ? 'border-cyan-400 bg-cyan-950/55 shadow-[0_0_16px_rgba(34,211,238,0.18)]'
+                            : 'border-slate-700/70 bg-[#0b1326]/90 hover:border-cyan-400/40'
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-semibold text-white">
-                          {player.gender === 'male' ? opt.maleTitle : opt.femaleTitle}
+                        <span className="flex items-center gap-1.5 text-xs font-semibold text-white">
+                          {!unlocked && (
+                            <Lock className="h-3.5 w-3.5 shrink-0 text-amber-300" aria-hidden="true" />
+                          )}
+                          <span>{player.gender === 'male' ? opt.maleTitle : opt.femaleTitle}</span>
                         </span>
                         <span className="flex items-center gap-1 shrink-0">
                           <span
@@ -265,6 +349,12 @@ export default function CustomizationStudioScreen({
                         </span>
                       </div>
                       <p className="mt-1 text-[11px] leading-snug text-slate-400">{opt.subtitle}</p>
+                      {!unlocked && (
+                        <p className="mt-1.5 flex items-center gap-1 text-[11px] font-semibold text-amber-300">
+                          <Lock className="h-3 w-3" aria-hidden="true" />
+                          Unlock at Level {reqLevel}
+                        </p>
+                      )}
                     </button>
                   );
                 })}
@@ -277,19 +367,43 @@ export default function CustomizationStudioScreen({
                     </div>
                     {HAIR_STYLE_OPTIONS.map((opt) => {
                       const selected = customization.hairStyle === opt.id;
+                      const unlocked = isItemUnlocked(
+                        player.level,
+                        player.unlockedItems,
+                        'hairStyle',
+                        opt.id,
+                      );
+                      const reqLevel = getRequiredLevelForItem('hairStyle', opt.id);
                       return (
                         <button
                           key={opt.id}
                           type="button"
+                          disabled={!unlocked}
+                          aria-disabled={!unlocked}
                           onClick={() => updateField('hairStyle', opt.id)}
                           aria-pressed={selected}
+                          data-testid={`option-hairStyle-${opt.id}`}
                           className={`w-full rounded-lg border px-3 py-2 text-left transition ${
-                            selected
-                              ? 'border-cyan-400 bg-cyan-950/55'
-                              : 'border-slate-700/70 bg-[#0b1326]/90 hover:border-cyan-400/40'
+                            !unlocked
+                              ? 'cursor-not-allowed border-slate-800/90 bg-[#080d1b]/75 opacity-65'
+                              : selected
+                                ? 'border-cyan-400 bg-cyan-950/55'
+                                : 'border-slate-700/70 bg-[#0b1326]/90 hover:border-cyan-400/40'
                           }`}
                         >
-                          <div className="text-xs font-semibold text-white">{opt.name}</div>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="flex items-center gap-1.5 text-xs font-semibold text-white">
+                              {!unlocked && (
+                                <Lock className="h-3.5 w-3.5 shrink-0 text-amber-300" aria-hidden="true" />
+                              )}
+                              <span>{opt.name}</span>
+                            </span>
+                            {!unlocked && (
+                              <span className="text-[10px] font-semibold text-amber-300">
+                                Unlock at Level {reqLevel}
+                              </span>
+                            )}
+                          </div>
                           <div className="mt-0.5 text-[11px] text-slate-400">
                             {player.gender === 'male' ? opt.maleDesc : opt.femaleDesc}
                           </div>
@@ -305,23 +419,44 @@ export default function CustomizationStudioScreen({
                     <div className="grid grid-cols-3 gap-1.5">
                       {HAIR_COLOR_OPTIONS.map((col) => {
                         const selected = customization.hairColor === col.id;
+                        const unlocked = isItemUnlocked(
+                          player.level,
+                          player.unlockedItems,
+                          'hairColor',
+                          col.id,
+                        );
+                        const reqLevel = getRequiredLevelForItem('hairColor', col.id);
                         return (
                           <button
                             key={col.id}
                             type="button"
+                            disabled={!unlocked}
+                            aria-disabled={!unlocked}
+                            title={unlocked ? col.name : `Unlock at Level ${reqLevel}`}
                             onClick={() => updateField('hairColor', col.id)}
                             aria-pressed={selected}
-                            className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-[11px] transition ${
-                              selected
-                                ? 'border-cyan-400 bg-cyan-950/55 text-white'
-                                : 'border-slate-700/70 bg-[#0b1326]/90 text-slate-300 hover:border-cyan-400/40'
+                            data-testid={`option-hairColor-${col.id}`}
+                            className={`flex flex-col items-start gap-1 rounded-lg border px-2 py-1.5 text-[11px] transition ${
+                              !unlocked
+                                ? 'cursor-not-allowed border-slate-800/90 bg-[#080d1b]/75 text-slate-400 opacity-65'
+                                : selected
+                                  ? 'border-cyan-400 bg-cyan-950/55 text-white'
+                                  : 'border-slate-700/70 bg-[#0b1326]/90 text-slate-300 hover:border-cyan-400/40'
                             }`}
                           >
-                            <span
-                              className="h-3.5 w-3.5 shrink-0 rounded-full border border-white/30"
-                              style={{ backgroundColor: col.hex }}
-                            />
-                            <span className="truncate">{col.name.split(' ')[0]}</span>
+                            <div className="flex w-full items-center gap-1.5">
+                              <span
+                                className="h-3.5 w-3.5 shrink-0 rounded-full border border-white/30"
+                                style={{ backgroundColor: col.hex }}
+                              />
+                              <span className="truncate">{col.name.split(' ')[0]}</span>
+                            </div>
+                            {!unlocked && (
+                              <span className="flex items-center gap-0.5 text-[9px] font-semibold text-amber-300">
+                                <Lock className="h-2.5 w-2.5" aria-hidden="true" />
+                                Unlock at Lv.{reqLevel}
+                              </span>
+                            )}
                           </button>
                         );
                       })}
@@ -333,26 +468,49 @@ export default function CustomizationStudioScreen({
               {activeCategory === 'sword' &&
                 SWORD_OPTIONS.map((opt) => {
                   const selected = customization.sword === opt.id;
+                  const unlocked = isItemUnlocked(
+                    player.level,
+                    player.unlockedItems,
+                    'sword',
+                    opt.id,
+                  );
+                  const reqLevel = getRequiredLevelForItem('sword', opt.id);
                   return (
                     <button
                       key={opt.id}
                       type="button"
+                      disabled={!unlocked}
+                      aria-disabled={!unlocked}
                       onClick={() => updateField('sword', opt.id, true)}
                       aria-pressed={selected}
+                      data-testid={`option-sword-${opt.id}`}
                       className={`w-full rounded-lg border p-2.5 text-left transition ${
-                        selected
-                          ? 'border-cyan-400 bg-cyan-950/55'
-                          : 'border-slate-700/70 bg-[#0b1326]/90 hover:border-cyan-400/40'
+                        !unlocked
+                          ? 'cursor-not-allowed border-slate-800/90 bg-[#080d1b]/75 opacity-65'
+                          : selected
+                            ? 'border-cyan-400 bg-cyan-950/55'
+                            : 'border-slate-700/70 bg-[#0b1326]/90 hover:border-cyan-400/40'
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-semibold text-white">{opt.name}</span>
+                        <span className="flex items-center gap-1.5 text-xs font-semibold text-white">
+                          {!unlocked && (
+                            <Lock className="h-3.5 w-3.5 shrink-0 text-amber-300" aria-hidden="true" />
+                          )}
+                          <span>{opt.name}</span>
+                        </span>
                         <span
                           className="h-2.5 w-5 rounded-sm border border-white/25"
                           style={{ backgroundColor: opt.glowHex }}
                         />
                       </div>
                       <p className="mt-1 text-[11px] text-slate-400">{opt.description}</p>
+                      {!unlocked && (
+                        <p className="mt-1.5 flex items-center gap-1 text-[11px] font-semibold text-amber-300">
+                          <Lock className="h-3 w-3" aria-hidden="true" />
+                          Unlock at Level {reqLevel}
+                        </p>
+                      )}
                     </button>
                   );
                 })}
@@ -360,26 +518,49 @@ export default function CustomizationStudioScreen({
               {activeCategory === 'archery' &&
                 ARCHERY_OPTIONS.map((opt) => {
                   const selected = customization.archery === opt.id;
+                  const unlocked = isItemUnlocked(
+                    player.level,
+                    player.unlockedItems,
+                    'archery',
+                    opt.id,
+                  );
+                  const reqLevel = getRequiredLevelForItem('archery', opt.id);
                   return (
                     <button
                       key={opt.id}
                       type="button"
+                      disabled={!unlocked}
+                      aria-disabled={!unlocked}
                       onClick={() => updateField('archery', opt.id, true)}
                       aria-pressed={selected}
+                      data-testid={`option-archery-${opt.id}`}
                       className={`w-full rounded-lg border p-2.5 text-left transition ${
-                        selected
-                          ? 'border-cyan-400 bg-cyan-950/55'
-                          : 'border-slate-700/70 bg-[#0b1326]/90 hover:border-cyan-400/40'
+                        !unlocked
+                          ? 'cursor-not-allowed border-slate-800/90 bg-[#080d1b]/75 opacity-65'
+                          : selected
+                            ? 'border-cyan-400 bg-cyan-950/55'
+                            : 'border-slate-700/70 bg-[#0b1326]/90 hover:border-cyan-400/40'
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-semibold text-white">{opt.name}</span>
+                        <span className="flex items-center gap-1.5 text-xs font-semibold text-white">
+                          {!unlocked && (
+                            <Lock className="h-3.5 w-3.5 shrink-0 text-amber-300" aria-hidden="true" />
+                          )}
+                          <span>{opt.name}</span>
+                        </span>
                         <span
                           className="h-2.5 w-5 rounded-sm border border-white/25"
                           style={{ backgroundColor: opt.glowHex }}
                         />
                       </div>
                       <p className="mt-1 text-[11px] text-slate-400">{opt.description}</p>
+                      {!unlocked && (
+                        <p className="mt-1.5 flex items-center gap-1 text-[11px] font-semibold text-amber-300">
+                          <Lock className="h-3 w-3" aria-hidden="true" />
+                          Unlock at Level {reqLevel}
+                        </p>
+                      )}
                     </button>
                   );
                 })}
@@ -387,20 +568,37 @@ export default function CustomizationStudioScreen({
               {activeCategory === 'superpower' &&
                 SUPERPOWER_OPTIONS.map((opt) => {
                   const selected = customization.superpower === opt.id;
+                  const unlocked = isItemUnlocked(
+                    player.level,
+                    player.unlockedItems,
+                    'superpower',
+                    opt.id,
+                  );
+                  const reqLevel = getRequiredLevelForItem('superpower', opt.id);
                   return (
                     <button
                       key={opt.id}
                       type="button"
+                      disabled={!unlocked}
+                      aria-disabled={!unlocked}
                       onClick={() => updateField('superpower', opt.id, true)}
                       aria-pressed={selected}
+                      data-testid={`option-superpower-${opt.id}`}
                       className={`w-full rounded-lg border p-2.5 text-left transition ${
-                        selected
-                          ? 'border-cyan-400 bg-cyan-950/55'
-                          : 'border-slate-700/70 bg-[#0b1326]/90 hover:border-cyan-400/40'
+                        !unlocked
+                          ? 'cursor-not-allowed border-slate-800/90 bg-[#080d1b]/75 opacity-65'
+                          : selected
+                            ? 'border-cyan-400 bg-cyan-950/55'
+                            : 'border-slate-700/70 bg-[#0b1326]/90 hover:border-cyan-400/40'
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-semibold text-white">{opt.name}</span>
+                        <span className="flex items-center gap-1.5 text-xs font-semibold text-white">
+                          {!unlocked && (
+                            <Lock className="h-3.5 w-3.5 shrink-0 text-amber-300" aria-hidden="true" />
+                          )}
+                          <span>{opt.name}</span>
+                        </span>
                         <span
                           className="h-3 w-3 rounded-full border border-white/30"
                           style={{ backgroundColor: opt.primaryHex }}
@@ -408,6 +606,12 @@ export default function CustomizationStudioScreen({
                       </div>
                       <p className="mt-0.5 text-[11px] font-medium text-cyan-300">{opt.element}</p>
                       <p className="mt-0.5 text-[11px] text-slate-400">{opt.description}</p>
+                      {!unlocked && (
+                        <p className="mt-1.5 flex items-center gap-1 text-[11px] font-semibold text-amber-300">
+                          <Lock className="h-3 w-3" aria-hidden="true" />
+                          Unlock at Level {reqLevel}
+                        </p>
+                      )}
                     </button>
                   );
                 })}
@@ -415,23 +619,48 @@ export default function CustomizationStudioScreen({
               {activeCategory === 'skinTone' &&
                 SKIN_TONE_OPTIONS.map((opt) => {
                   const selected = customization.skinTone === opt.id;
+                  const unlocked = isItemUnlocked(
+                    player.level,
+                    player.unlockedItems,
+                    'skinTone',
+                    opt.id,
+                  );
+                  const reqLevel = getRequiredLevelForItem('skinTone', opt.id);
                   return (
                     <button
                       key={opt.id}
                       type="button"
+                      disabled={!unlocked}
+                      aria-disabled={!unlocked}
                       onClick={() => updateField('skinTone', opt.id)}
                       aria-pressed={selected}
-                      className={`flex w-full items-center gap-3 rounded-lg border p-2.5 text-left transition ${
-                        selected
-                          ? 'border-cyan-400 bg-cyan-950/55'
-                          : 'border-slate-700/70 bg-[#0b1326]/90 hover:border-cyan-400/40'
+                      data-testid={`option-skinTone-${opt.id}`}
+                      className={`flex w-full items-center justify-between gap-3 rounded-lg border p-2.5 text-left transition ${
+                        !unlocked
+                          ? 'cursor-not-allowed border-slate-800/90 bg-[#080d1b]/75 opacity-65'
+                          : selected
+                            ? 'border-cyan-400 bg-cyan-950/55'
+                            : 'border-slate-700/70 bg-[#0b1326]/90 hover:border-cyan-400/40'
                       }`}
                     >
-                      <span
-                        className="h-7 w-7 shrink-0 rounded-full border border-white/30"
-                        style={{ backgroundColor: opt.hex }}
-                      />
-                      <span className="text-xs font-semibold text-white">{opt.name}</span>
+                      <div className="flex items-center gap-3">
+                        <span
+                          className="h-7 w-7 shrink-0 rounded-full border border-white/30"
+                          style={{ backgroundColor: opt.hex }}
+                        />
+                        <div>
+                          <span className="block text-xs font-semibold text-white">{opt.name}</span>
+                          {!unlocked && (
+                            <span className="mt-0.5 flex items-center gap-1 text-[10px] font-semibold text-amber-300">
+                              <Lock className="h-2.5 w-2.5" aria-hidden="true" />
+                              Unlock at Level {reqLevel}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      {!unlocked && (
+                        <Lock className="h-3.5 w-3.5 shrink-0 text-amber-300" aria-hidden="true" />
+                      )}
                     </button>
                   );
                 })}
@@ -439,38 +668,52 @@ export default function CustomizationStudioScreen({
           </section>
         )}
 
-        {/* Vertical Icon Rail (6 Categories with tooltips) */}
+        {/* Vertical Icon Rail (6 Categories with tooltips and lock indicators) */}
         <nav
           aria-label="Customization Categories"
           className="pointer-events-auto flex flex-col gap-2 rounded-xl border border-cyan-400/25 bg-[#060b18]/90 p-2 shadow-[0_14px_36px_rgba(0,0,0,0.7)]"
         >
           {CUSTOMIZATION_CATEGORIES.map((cat) => {
             const isActive = activeCategory === cat.key && drawerOpen;
+            const catUnlocked = isCategoryUnlocked(player.level, cat.key);
+            const catReqLevel = CATEGORY_UNLOCK_LEVELS[cat.key];
             return (
               <div key={cat.key} className="group relative">
                 <button
                   type="button"
                   onClick={() => handleIconClick(cat.key)}
-                  aria-label={cat.label}
+                  aria-label={catUnlocked ? cat.label : `${cat.label} (Unlock at Level ${catReqLevel})`}
                   aria-pressed={isActive}
-                  title={cat.label}
+                  title={catUnlocked ? cat.label : `${cat.label} · Unlock at Level ${catReqLevel}`}
                   data-testid={`icon-tab-${cat.key}`}
-                  className={`flex h-11 w-11 items-center justify-center rounded-lg border transition ${
+                  className={`relative flex h-11 w-11 items-center justify-center rounded-lg border transition ${
                     isActive
                       ? 'border-cyan-400 bg-cyan-500/25 text-cyan-200 shadow-[0_0_16px_rgba(34,211,238,0.28)]'
-                      : 'border-slate-700/60 bg-[#0b1326] text-slate-300 hover:border-cyan-400/50 hover:text-white'
+                      : catUnlocked
+                        ? 'border-slate-700/60 bg-[#0b1326] text-slate-300 hover:border-cyan-400/50 hover:text-white'
+                        : 'border-slate-800 bg-[#070b15] text-slate-500 hover:border-amber-400/45 hover:text-slate-300'
                   }`}
                 >
                   <FantasyCategoryIcon category={cat.key} className="h-5 w-5" />
+                  {!catUnlocked && (
+                    <span
+                      aria-hidden="true"
+                      className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-amber-400/50 bg-[#0b1326] text-amber-300"
+                    >
+                      <Lock className="h-2.5 w-2.5" />
+                    </span>
+                  )}
                 </button>
 
-                {/* Hover Tooltip */}
-                <span
-                  role="tooltip"
-                  className="pointer-events-none absolute right-14 top-1/2 -translate-y-1/2 whitespace-nowrap rounded-md border border-cyan-400/35 bg-[#060b18] px-2.5 py-1 text-xs font-medium text-cyan-100 opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100"
-                >
-                  {cat.label}
-                </span>
+                {/* Hover Tooltip (hidden for already-active open drawer to prevent header overlap) */}
+                {!isActive && (
+                  <span
+                    role="tooltip"
+                    className="pointer-events-none absolute right-14 top-1/2 z-30 -translate-y-1/2 whitespace-nowrap rounded-md border border-cyan-400/35 bg-[#060b18] px-2.5 py-1 text-xs font-medium text-cyan-100 opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100"
+                  >
+                    {catUnlocked ? cat.label : `${cat.label} · Unlock at Level ${catReqLevel}`}
+                  </span>
+                )}
               </div>
             );
           })}

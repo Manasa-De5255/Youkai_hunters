@@ -25,11 +25,13 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
 
   // Login form state
   const [loginUser, setLoginUser] = useState('');
+  const [loginPlayerId, setLoginPlayerId] = useState('');
   const [loginPass, setLoginPass] = useState('');
   const [showLoginPass, setShowLoginPass] = useState(false);
 
   // Register form state
   const [regUser, setRegUser] = useState('');
+  const [regPlayerId, setRegPlayerId] = useState('');
   const [regPass, setRegPass] = useState('');
   const [regConfirmPass, setRegConfirmPass] = useState('');
   const [regGender, setRegGender] = useState<Gender>('male');
@@ -58,8 +60,13 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
     setError(null);
     setSuccessMsg(null);
 
-    if (!loginUser.trim() || !loginPass) {
-      setError('Enter both your username and password.');
+    if (!loginUser.trim()) {
+      setError('Enter your hunter username.');
+      return;
+    }
+
+    if (!loginPlayerId.trim() && !loginPass) {
+      setError('Enter your Player ID or your password to sign in.');
       return;
     }
 
@@ -67,7 +74,8 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
     try {
       const player = await loginPlayerAccount({
         username: loginUser.trim(),
-        password: loginPass,
+        playerId: loginPlayerId.trim() || undefined,
+        password: loginPass || undefined,
       });
       onAuthenticated(player);
     } catch (err) {
@@ -84,6 +92,7 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
 
     const check = validateRegistrationInput({
       username: regUser,
+      playerId: regPlayerId.trim() || undefined,
       password: regPass,
       confirmPassword: regConfirmPass,
       gender: regGender,
@@ -99,6 +108,7 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
     try {
       const player = await registerPlayerAccount({
         username: regUser.trim(),
+        playerId: regPlayerId.trim() || undefined,
         password: regPass,
         confirmPassword: regConfirmPass,
         gender: regGender,
@@ -280,25 +290,40 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
           )}
 
           {tab === 'login' && (
-            <form onSubmit={handleLogin} className="space-y-3">
-              <div>
-                <label htmlFor="login-username" className="mb-1 block text-xs font-medium text-slate-300">
-                  Username
-                </label>
-                <input
-                  id="login-username"
-                  type="text"
-                  autoComplete="username"
-                  value={loginUser}
-                  onChange={(e) => setLoginUser(e.target.value)}
-                  placeholder="Enter your hunter username"
-                  className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
-                />
+            <form onSubmit={handleLogin} className="space-y-2.5">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label htmlFor="login-username" className="mb-1 block text-xs font-medium text-slate-300">
+                    Username
+                  </label>
+                  <input
+                    id="login-username"
+                    type="text"
+                    autoComplete="username"
+                    value={loginUser}
+                    onChange={(e) => setLoginUser(e.target.value)}
+                    placeholder="Hunter name"
+                    className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="login-player-id" className="mb-1 block text-xs font-medium text-slate-300">
+                    Player ID
+                  </label>
+                  <input
+                    id="login-player-id"
+                    type="text"
+                    value={loginPlayerId}
+                    onChange={(e) => setLoginPlayerId(e.target.value)}
+                    placeholder="e.g. YH-10001"
+                    className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
+                  />
+                </div>
               </div>
               <div>
                 <div className="mb-1 flex items-center justify-between">
                   <label htmlFor="login-password" className="text-xs font-medium text-slate-300">
-                    Password
+                    Password <span className="text-slate-500">(optional with Player ID)</span>
                   </label>
                   <button
                     type="button"
@@ -328,6 +353,9 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
                   </button>
                 </div>
               </div>
+              <p className="text-[11px] text-slate-400">
+                Sign in using Username + Player ID or Username + Password.
+              </p>
               <button
                 type="submit"
                 disabled={loading}
@@ -340,19 +368,34 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
 
           {tab === 'register' && (
             <form onSubmit={handleRegister} className="max-h-[54vh] space-y-2.5 overflow-y-auto pr-1 yh-scroll">
-              <div>
-                <label htmlFor="reg-username" className="mb-1 block text-xs font-medium text-slate-300">
-                  Unique Username
-                </label>
-                <input
-                  id="reg-username"
-                  type="text"
-                  autoComplete="username"
-                  value={regUser}
-                  onChange={(e) => setRegUser(e.target.value)}
-                  placeholder="3–24 chars (letters, numbers, _ -)"
-                  className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
-                />
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label htmlFor="reg-username" className="mb-1 block text-xs font-medium text-slate-300">
+                    Unique Username
+                  </label>
+                  <input
+                    id="reg-username"
+                    type="text"
+                    autoComplete="username"
+                    value={regUser}
+                    onChange={(e) => setRegUser(e.target.value)}
+                    placeholder="3–24 chars"
+                    className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="reg-player-id" className="mb-1 block text-xs font-medium text-slate-300">
+                    Player ID <span className="text-slate-500">(Optional)</span>
+                  </label>
+                  <input
+                    id="reg-player-id"
+                    type="text"
+                    value={regPlayerId}
+                    onChange={(e) => setRegPlayerId(e.target.value)}
+                    placeholder="Auto or custom ID"
+                    className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-2">

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createServer as createViteServer } from 'vite';
 import { YokaiDatabase } from './src/server/db';
-import { Gender } from './src/types/game';
+import { ActivityId, Gender } from './src/types/game';
 
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_COOKIE = 'yh_session';
@@ -55,9 +55,29 @@ async function startServer() {
   const db = new YokaiDatabase();
 
   const getAuthenticatedPlayer = (req: Request) => {
+    const authHeader = req.headers.authorization;
+    const bearerToken =
+      typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')
+        ? authHeader.slice(7).trim()
+        : undefined;
     const cookies = parseCookies(req.headers.cookie);
-    const token = cookies[SESSION_COOKIE];
-    return { token, player: db.getPlayerBySession(token) };
+    const cookieToken = cookies[SESSION_COOKIE];
+
+    if (bearerToken) {
+      const bearerPlayer = db.getPlayerBySession(bearerToken);
+      if (bearerPlayer) {
+        return { token: bearerToken, cookieToken, player: bearerPlayer };
+      }
+    }
+
+    if (cookieToken) {
+      const cookiePlayer = db.getPlayerBySession(cookieToken);
+      if (cookiePlayer) {
+        return { token: cookieToken, cookieToken, player: cookiePlayer };
+      }
+    }
+
+    return { token: bearerToken || cookieToken, cookieToken, player: null };
   };
 
   app.get('/api/auth/me', (req, res) => {
@@ -66,10 +86,18 @@ async function startServer() {
   });
 
   app.post('/api/auth/register', (req, res) => {
-    const { username, password, confirmPassword, gender, recoveryQuestion, recoveryAnswer } =
-      req.body ?? {};
+    const {
+      username,
+      playerId,
+      password,
+      confirmPassword,
+      gender,
+      recoveryQuestion,
+      recoveryAnswer,
+    } = req.body ?? {};
     const result = db.registerPlayer({
       username: String(username ?? ''),
+      playerId: typeof playerId === 'string' ? playerId : undefined,
       password: String(password ?? ''),
       confirmPassword: String(confirmPassword ?? ''),
       gender: gender as Gender,
@@ -83,14 +111,15 @@ async function startServer() {
     }
 
     setSessionCookie(req, res, result.sessionToken);
-    res.status(201).json({ player: result.player });
+    res.status(201).json({ player: result.player, sessionToken: result.sessionToken });
   });
 
   app.post('/api/auth/login', (req, res) => {
-    const { username, password } = req.body ?? {};
+    const { username, playerId, password } = req.body ?? {};
     const result = db.loginPlayer({
       username: String(username ?? ''),
-      password: String(password ?? ''),
+      playerId: typeof playerId === 'string' ? playerId : undefined,
+      password: typeof password === 'string' ? password : '',
     });
 
     if (!result.ok) {
@@ -99,12 +128,15 @@ async function startServer() {
     }
 
     setSessionCookie(req, res, result.sessionToken);
-    res.json({ player: result.player });
+    res.json({ player: result.player, sessionToken: result.sessionToken });
   });
 
   app.post('/api/auth/logout', (req, res) => {
-    const { token } = getAuthenticatedPlayer(req);
+    const { token, cookieToken } = getAuthenticatedPlayer(req);
     db.deleteSession(token);
+    if (cookieToken && cookieToken !== token) {
+      db.deleteSession(cookieToken);
+    }
     clearSessionCookie(req, res);
     res.json({ ok: true });
   });
@@ -157,12 +189,70 @@ async function startServer() {
     }
     const gender = (req.body?.gender as Gender) || player.gender;
     const customization = req.body?.customization;
-    const updated = db.updatePlayerCustomization(player.playerId, gender, customization);
-    if (!updated) {
-      res.status(400).json({ error: 'Invalid customization payload.' });
+    const result = db.updatePlayerCustomization(player.playerId, gender, customization);
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error });
       return;
     }
-    res.json({ player: updated });
+    res.json({ player: result.player });
+  });
+
+  app.post('/api/player/progress', (req, res) => {
+    const { player } = getAuthenticatedPlayer(req);
+    if (!player) {
+      res.status(401).json({ error: 'Not authenticated.' });
+      return;
+    }
+    const activityId = (req.body?.activityId ?? req.body?.action) as ActivityId;
+    const result = db.recordActivityProgress(player.playerId, activityId);
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error });
+      return;
+    }
+    res.json({
+      player: result.player,
+      leveledUp: result.leveledUp,
+      newlyUnlocked: result.newlyUnlocked,
+    });
+  });
+
+  app.post('/api/player/kodama/hit', (req, res) => {
+    const { player } = getAuthenticatedPlayer(req);
+    if (!player) {
+      res.status(401).json({ error: 'Not authenticated.' });
+      return;
+    }
+    const result = db.awardKodamaHit(player.playerId);
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error });
+      return;
+    }
+    res.json({
+      player: result.player,
+      leveledUp: result.leveledUp,
+      newlyUnlocked: result.newlyUnlocked,
+    });
+  });
+
+  app.post('/api/player/kodama/round', (req, res) => {
+    const { player } = getAuthenticatedPlayer(req);
+    if (!player) {
+      res.status(401).json({ error: 'Not authenticated.' });
+      return;
+    }
+    const round = Number(req.body?.round);
+    const hits = Number(req.body?.hits);
+    const result = db.completeKodamaRound(player.playerId, round, hits);
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error });
+      return;
+    }
+    res.json({
+      player: result.player,
+      passed: result.passed,
+      newlyCompleted: result.newlyCompleted,
+      stage2JustUnlocked: result.stage2JustUnlocked,
+    });
   });
 
   const isProd = process.env.NODE_ENV === 'production';

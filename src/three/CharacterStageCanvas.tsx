@@ -8,6 +8,7 @@ import { WarriorCharacter3D } from './WarriorCharacter3D';
 interface CharacterStageCanvasProps {
   gender: Gender;
   customization: CharacterCustomization;
+  playerLevel: number;
   flourishSignal: number;
   resetViewSignal: number;
   rotateStepSignal: { seq: number; deltaRad: number };
@@ -27,6 +28,7 @@ function detectSoftwareWebGL(): boolean {
 export default function CharacterStageCanvas({
   gender,
   customization,
+  playerLevel,
   flourishSignal,
   resetViewSignal,
   rotateStepSignal,
@@ -38,7 +40,7 @@ export default function CharacterStageCanvas({
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const stageElRef = useRef<HTMLDivElement | null>(null);
-  const initialPropsRef = useRef({ gender, customization });
+  const initialPropsRef = useRef({ gender, customization, playerLevel });
   const prevFlourishRef = useRef(flourishSignal);
 
   const syncCamDataset = () => {
@@ -198,7 +200,9 @@ export default function CharacterStageCanvas({
     scene.add(daisGroup);
 
     const warrior = new WarriorCharacter3D(renderer.capabilities.getMaxAnisotropy());
-    warrior.rebuild(initialPropsRef.current.gender, initialPropsRef.current.customization);
+    warrior.rebuild(initialPropsRef.current.gender, initialPropsRef.current.customization, {
+      playerLevel: initialPropsRef.current.playerLevel,
+    });
     scene.add(warrior.root);
     warriorRef.current = warrior;
 
@@ -310,7 +314,7 @@ export default function CharacterStageCanvas({
   useEffect(() => {
     const warrior = warriorRef.current;
     if (!warrior) return;
-    warrior.rebuild(gender, customization);
+    warrior.rebuild(gender, customization, { playerLevel });
     if (flourishSignal !== prevFlourishRef.current) {
       prevFlourishRef.current = flourishSignal;
       warrior.triggerFlourish();
@@ -318,7 +322,7 @@ export default function CharacterStageCanvas({
     if (rendererRef.current && sceneRef.current && cameraRef.current) {
       rendererRef.current.render(sceneRef.current, cameraRef.current);
     }
-  }, [gender, customization, flourishSignal]);
+  }, [gender, customization, playerLevel, flourishSignal]);
 
   useEffect(() => {
     if (resetViewSignal === 0) return;
@@ -353,6 +357,7 @@ export default function CharacterStageCanvas({
     <div
       ref={mountRef}
       data-testid="character-canvas-stage"
+      data-level={playerLevel}
       data-gender={gender}
       data-costume={customization.costume}
       data-hair={customization.hairStyle}
