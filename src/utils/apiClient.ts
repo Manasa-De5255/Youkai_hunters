@@ -2,6 +2,11 @@ import { ActivityId, CharacterCustomization, Gender, PlayerAccount } from '../ty
 
 const SESSION_STORAGE_KEY = 'yh_session_token';
 
+function apiUrl(path: string): string {
+  const base = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '');
+  return base ? `${base}${path}` : path;
+}
+
 function getStoredToken(): string | null {
   try {
     return window.localStorage.getItem(SESSION_STORAGE_KEY);
@@ -22,25 +27,48 @@ function setStoredToken(token: string | null | undefined): void {
   }
 }
 
-async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
-  const token = getStoredToken();
+function extractErrorMessage(data: unknown, status: number): string {
+  if (data && typeof data === 'object') {
+    const record = data as Record<string, unknown>;
+    if (typeof record.error === 'string' && record.error.trim()) {
+      return record.error;
+    }
+    if (record.error && typeof record.error === 'object') {
+      const nested = (record.error as Record<string, unknown>).message;
+      if (typeof nested === 'string' && nested.trim()) {
+        return nested;
+      }
+    }
+    if (typeof record.message === 'string' && record.message.trim()) {
+      return record.message;
+    }
+  }
+  return `Request failed (HTTP ${status}).`;
+}
+
+async function requestJson<T>(
+  path: string,
+  options?: RequestInit & { skipAuthHeader?: boolean },
+): Promise<T> {
+  const { skipAuthHeader, ...fetchOptions } = options ?? {};
+  const token = skipAuthHeader ? null : getStoredToken();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...((options?.headers as Record<string, string>) ?? {}),
+    ...((fetchOptions.headers as Record<string, string>) ?? {}),
   };
   if (token && !headers.Authorization) {
     headers.Authorization = `Bearer ${token}`;
   }
 
-  const res = await fetch(url, {
+  const res = await fetch(apiUrl(path), {
     credentials: 'include',
-    ...options,
+    ...fetchOptions,
     headers,
   });
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(typeof data.error === 'string' ? data.error : 'Request failed.');
+    throw new Error(extractErrorMessage(data, res.status));
   }
   return data as T;
 }
@@ -48,7 +76,7 @@ async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
 export async function fetchCurrentPlayer(): Promise<PlayerAccount | null> {
   try {
     const token = getStoredToken();
-    const res = await fetch('/api/auth/me', {
+    const res = await fetch(apiUrl('/api/auth/me'), {
       credentials: 'include',
       headers: token ? { Authorization: `Bearer ${token}` } : undefined,
     });
@@ -80,6 +108,7 @@ export async function registerPlayerAccount(payload: {
     '/api/auth/register',
     {
       method: 'POST',
+      skipAuthHeader: true,
       body: JSON.stringify(payload),
     },
   );
@@ -98,6 +127,7 @@ export async function loginPlayerAccount(payload: {
     '/api/auth/login',
     {
       method: 'POST',
+      skipAuthHeader: true,
       body: JSON.stringify(payload),
     },
   );
@@ -118,6 +148,7 @@ export async function logoutPlayerAccount(): Promise<void> {
 export async function fetchRecoveryQuestion(username: string): Promise<string> {
   const data = await requestJson<{ question: string }>(
     `/api/auth/recovery-question?username=${encodeURIComponent(username)}`,
+    { skipAuthHeader: true },
   );
   return data.question;
 }
@@ -130,6 +161,7 @@ export async function resetPlayerPassword(payload: {
 }): Promise<void> {
   await requestJson<{ ok: boolean }>('/api/auth/forgot-password', {
     method: 'POST',
+    skipAuthHeader: true,
     body: JSON.stringify(payload),
   });
 }

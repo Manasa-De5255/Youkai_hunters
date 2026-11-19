@@ -25,127 +25,43 @@ import {
   validatePasswordResetInput,
   validateRegistrationInput,
 } from '../utils/authValidation';
+import {
+  hashSecret,
+  hashToken,
+  parseCompletedRounds,
+  parseUnlockedItems,
+  PlayerRow,
+  rowToPlayerAccount,
+  verifySecret,
+  YokaiStore,
+} from './store';
 
-function hashSecret(secret: string): string {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const derived = crypto.scryptSync(secret, salt, 64).toString('hex');
-  return `scrypt:${salt}:${derived}`;
-}
-
-function verifySecret(secret: string, storedHash: string): boolean {
-  const parts = storedHash.split(':');
-  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
-  const [, salt, originalHex] = parts;
-  const derived = crypto.scryptSync(secret, salt, 64);
-  const original = Buffer.from(originalHex, 'hex');
-  if (derived.length !== original.length) return false;
-  return crypto.timingSafeEqual(derived, original);
-}
-
-function hashToken(token: string): string {
-  return crypto.createHash('sha256').update(token).digest('hex');
-}
-
-interface PlayerRow {
-  id: number;
-  player_id: string;
-  player_id_lower?: string | null;
-  username: string;
-  username_lower: string;
-  password_hash: string;
-  recovery_question: string;
-  recovery_answer_hash: string;
-  gender: Gender;
-  level?: number;
-  xp?: number;
-  orbs_cleared?: number;
-  unlocked_items?: string;
-  diamonds?: number;
-  kodama_completed_rounds?: string;
-  stage2_unlocked?: number;
-  male_customization: string;
-  female_customization: string;
-  created_at: string;
-  updated_at: string;
-}
-
-function parseUnlockedItems(raw: string | undefined): string[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is string => typeof item === 'string')
-      : [];
-  } catch {
-    return [];
+function resolveDefaultSqlitePath(): string {
+  if (process.env.SQLITE_DB_PATH && process.env.SQLITE_DB_PATH.trim()) {
+    return process.env.SQLITE_DB_PATH.trim();
   }
+  if (process.env.VERCEL) {
+    return path.join('/tmp', 'yokai_hunters.db');
+  }
+  return path.resolve(process.cwd(), 'data', 'yokai_hunters.db');
 }
 
-function parseCompletedRounds(raw: string | undefined): number[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is number => typeof item === 'number')
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-function rowToPlayerAccount(row: PlayerRow): PlayerAccount {
-  let parsedMale: Partial<CharacterCustomization> = {};
-  let parsedFemale: Partial<CharacterCustomization> = {};
-  try {
-    parsedMale = JSON.parse(row.male_customization);
-  } catch {
-    parsedMale = {};
-  }
-  try {
-    parsedFemale = JSON.parse(row.female_customization);
-  } catch {
-    parsedFemale = {};
-  }
-
-  const xp = Math.max(0, Math.floor(Number(row.xp ?? 0)));
-  const level = Math.max(1, getLevelFromXp(xp), Math.floor(Number(row.level ?? 1)));
-  const orbsCleared = Math.max(0, Math.floor(Number(row.orbs_cleared ?? 0)));
-  const unlockedItems = getUnlockedItemsForLevel(level, parseUnlockedItems(row.unlocked_items));
-  const kodamaProgress = sanitizeKodamaProgress({
-    diamonds: row.diamonds ?? 0,
-    completedRounds: parseCompletedRounds(row.kodama_completed_rounds),
-    stage2Unlocked: Boolean(row.stage2_unlocked),
-  });
-
-  return {
-    playerId: row.player_id,
-    username: row.username,
-    gender: row.gender,
-    level,
-    xp,
-    orbsCleared,
-    unlockedItems,
-    kodamaProgress,
-    recoveryQuestion: row.recovery_question,
-    maleCustomization: enforceCustomizationProgression(parsedMale, 'male', level, unlockedItems),
-    femaleCustomization: enforceCustomizationProgression(
-      parsedFemale,
-      'female',
-      level,
-      unlockedItems,
-    ),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
-
-export class YokaiDatabase {
+export class YokaiDatabase implements YokaiStore {
   private db: Database.Database;
 
   constructor(dbPath?: string) {
-    const resolved = dbPath ?? path.resolve(process.cwd(), 'data', 'yokai_hunters.db');
+    let resolved = dbPath ?? resolveDefaultSqlitePath();
     if (resolved !== ':memory:') {
-      fs.mkdirSync(path.dirname(resolved), { recursive: true });
+      try {
+        fs.mkdirSync(path.dirname(resolved), { recursive: true });
+      } catch (err) {
+        if (!dbPath) {
+          resolved = path.join('/tmp', 'yokai_hunters.db');
+          fs.mkdirSync(path.dirname(resolved), { recursive: true });
+        } else {
+          throw err;
+        }
+      }
     }
     this.db = new Database(resolved);
     this.db.pragma('journal_mode = WAL');
@@ -418,9 +334,12 @@ export class YokaiDatabase {
     if (!usernameLower) {
       return { ok: false, error: 'Enter your username first.', status: 400 };
     }
-    const row = this.db
+    const row = (this.db
       .prepare('SELECT recovery_question FROM players WHERE username_lower = ?')
-      .get(usernameLower) as { recovery_question: string } | undefined;
+      .get(usernameLower) ??
+      this.db
+        .prepare('SELECT recovery_question FROM players WHERE LOWER(TRIM(username)) = ?')
+        .get(usernameLower)) as { recovery_question: string } | undefined;
     if (!row) {
       return { ok: false, error: 'No hunter account found with that username.', status: 404 };
     }
@@ -439,9 +358,12 @@ export class YokaiDatabase {
     }
 
     const usernameLower = normalizeUsername(input.username).toLowerCase();
-    const row = this.db
+    const row = (this.db
       .prepare('SELECT * FROM players WHERE username_lower = ?')
-      .get(usernameLower) as PlayerRow | undefined;
+      .get(usernameLower) ??
+      this.db
+        .prepare('SELECT * FROM players WHERE LOWER(TRIM(username)) = ?')
+        .get(usernameLower)) as PlayerRow | undefined;
 
     if (!row) {
       return { ok: false, error: 'No hunter account found with that username.', status: 404 };
