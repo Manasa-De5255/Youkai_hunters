@@ -1,7 +1,7 @@
 import { FormEvent, useState } from 'react';
-import { Eye, EyeOff, KeyRound, ShieldAlert, UserCheck, UserPlus } from 'lucide-react';
+import { Eye, EyeOff, KeyRound, Mail, ShieldAlert, UserCheck, UserPlus } from 'lucide-react';
 import { UPLOADED_ASSETS } from '../data/customizationCatalog';
-import { Gender, PlayerAccount } from '../types/game';
+import { PlayerAccount } from '../types/game';
 import {
   fetchRecoveryQuestion,
   loginPlayerAccount,
@@ -9,6 +9,7 @@ import {
   resetPlayerPassword,
 } from '../utils/apiClient';
 import {
+  validateEmail,
   validatePasswordResetInput,
   validateRegistrationInput,
 } from '../utils/authValidation';
@@ -23,23 +24,21 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
   const [tab, setTab] = useState<AuthTab>('login');
   const [panelCollapsed, setPanelCollapsed] = useState(false);
 
-  // Login form state
-  const [loginUser, setLoginUser] = useState('');
-  const [loginPlayerId, setLoginPlayerId] = useState('');
+  // Login form state (Email-first, supports legacy Hunter name / Player ID toggle)
+  const [loginEmail, setLoginEmail] = useState('');
   const [loginPass, setLoginPass] = useState('');
+  const [loginPlayerId, setLoginPlayerId] = useState('');
+  const [useLegacyPlayerId, setUseLegacyPlayerId] = useState(false);
   const [showLoginPass, setShowLoginPass] = useState(false);
 
-  // Register form state
-  const [regUser, setRegUser] = useState('');
-  const [regPlayerId, setRegPlayerId] = useState('');
+  // Register form state (Email + Password only; Name & Gender asked on First Login)
+  const [regEmail, setRegEmail] = useState('');
   const [regPass, setRegPass] = useState('');
   const [regConfirmPass, setRegConfirmPass] = useState('');
-  const [regGender, setRegGender] = useState<Gender>('male');
-  const [regRecoveryQuestion, setRegRecoveryQuestion] = useState('Guardian Spirit Secret Word');
   const [regRecoveryAnswer, setRegRecoveryAnswer] = useState('');
 
   // Forgot password state
-  const [forgotUser, setForgotUser] = useState('');
+  const [forgotIdentifier, setForgotIdentifier] = useState('');
   const [loadedQuestion, setLoadedQuestion] = useState<string | null>(null);
   const [forgotAnswer, setForgotAnswer] = useState('');
   const [newPass, setNewPass] = useState('');
@@ -60,23 +59,37 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
     setError(null);
     setSuccessMsg(null);
 
-    if (!loginUser.trim()) {
-      setError('Enter your hunter username.');
+    const identifier = loginEmail.trim();
+    if (!identifier) {
+      setError('Enter your email address.');
       return;
     }
 
-    if (!loginPlayerId.trim() && !loginPass) {
-      setError('Enter your Player ID or your password to sign in.');
+    if (useLegacyPlayerId) {
+      if (!loginPlayerId.trim() && !loginPass) {
+        setError('Enter your Player ID or password to sign in.');
+        return;
+      }
+    } else if (!loginPass) {
+      setError('Enter your password to sign in.');
       return;
     }
 
     setLoading(true);
     try {
-      const player = await loginPlayerAccount({
-        username: loginUser.trim(),
-        playerId: loginPlayerId.trim() || undefined,
-        password: loginPass || undefined,
-      });
+      const player = await loginPlayerAccount(
+        identifier.includes('@')
+          ? {
+              email: identifier.toLowerCase(),
+              playerId: useLegacyPlayerId ? loginPlayerId.trim() || undefined : undefined,
+              password: loginPass || undefined,
+            }
+          : {
+              username: identifier,
+              playerId: useLegacyPlayerId ? loginPlayerId.trim() || undefined : undefined,
+              password: loginPass || undefined,
+            },
+      );
       onAuthenticated(player);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to sign in.');
@@ -90,13 +103,17 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
     setError(null);
     setSuccessMsg(null);
 
+    const emailCheck = validateEmail(regEmail);
+    if (!emailCheck.valid) {
+      setError(emailCheck.error || 'Please enter a valid email address.');
+      return;
+    }
+
     const check = validateRegistrationInput({
-      username: regUser,
-      playerId: regPlayerId.trim() || undefined,
+      email: regEmail.trim(),
       password: regPass,
       confirmPassword: regConfirmPass,
-      gender: regGender,
-      recoveryAnswer: regRecoveryAnswer,
+      recoveryAnswer: regRecoveryAnswer.trim() || undefined,
     });
 
     if (!check.valid) {
@@ -107,13 +124,11 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
     setLoading(true);
     try {
       const player = await registerPlayerAccount({
-        username: regUser.trim(),
-        playerId: regPlayerId.trim() || undefined,
+        email: regEmail.trim().toLowerCase(),
         password: regPass,
         confirmPassword: regConfirmPass,
-        gender: regGender,
-        recoveryQuestion: regRecoveryQuestion.trim() || 'Guardian Spirit Secret Word',
-        recoveryAnswer: regRecoveryAnswer.trim(),
+        recoveryQuestion: 'Guardian Spirit Secret Word',
+        recoveryAnswer: regRecoveryAnswer.trim() || undefined,
       });
       onAuthenticated(player);
     } catch (err) {
@@ -126,13 +141,13 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
   const handleLookupQuestion = async () => {
     setError(null);
     setSuccessMsg(null);
-    if (!forgotUser.trim()) {
-      setError('Enter your username to locate your recovery prompt.');
+    if (!forgotIdentifier.trim()) {
+      setError('Enter your email or username to locate your recovery prompt.');
       return;
     }
     setLoading(true);
     try {
-      const q = await fetchRecoveryQuestion(forgotUser.trim());
+      const q = await fetchRecoveryQuestion(forgotIdentifier.trim());
       setLoadedQuestion(q);
     } catch (err) {
       setLoadedQuestion(null);
@@ -148,7 +163,7 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
     setSuccessMsg(null);
 
     const check = validatePasswordResetInput({
-      username: forgotUser,
+      username: forgotIdentifier,
       recoveryAnswer: forgotAnswer,
       newPassword: newPass,
       confirmNewPassword: confirmNewPass,
@@ -161,13 +176,13 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
     setLoading(true);
     try {
       await resetPlayerPassword({
-        username: forgotUser.trim(),
+        username: forgotIdentifier.trim(),
         recoveryAnswer: forgotAnswer.trim(),
         newPassword: newPass,
         confirmNewPassword: confirmNewPass,
       });
       setSuccessMsg('Password updated. Sign in with your new password.');
-      setLoginUser(forgotUser.trim());
+      setLoginEmail(forgotIdentifier.trim());
       setLoginPass('');
       setForgotAnswer('');
       setNewPass('');
@@ -180,6 +195,11 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
       setLoading(false);
     }
   };
+
+  const showQuickRegisterHint =
+    tab === 'login' &&
+    error?.toLowerCase().includes('no hunter account found') &&
+    loginEmail.includes('@');
 
   return (
     <main className="relative h-screen w-screen overflow-hidden bg-[#040712]">
@@ -197,7 +217,6 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
         aria-hidden="true"
       />
 
-      {/* Compact single toggle button only if collapsed */}
       {panelCollapsed ? (
         <div className="absolute bottom-6 left-1/2 z-20 -translate-x-1/2">
           <button
@@ -209,10 +228,9 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
           </button>
         </div>
       ) : (
-        /* Docked cleanly in the lower-center negative space over the lake reflection so title, pagoda, moon, and warrior remain visible */
         <section
           aria-label="Hunter Authentication"
-          className="absolute bottom-5 left-1/2 z-20 w-[calc(100%-2rem)] max-w-[420px] -translate-x-1/2 rounded-xl border border-cyan-400/25 bg-[#060b18]/88 p-4 text-slate-100 shadow-[0_18px_50px_rgba(0,0,0,0.72),0_0_28px_rgba(34,211,238,0.12)]"
+          className="absolute bottom-5 left-1/2 z-20 w-[calc(100%-2rem)] max-w-[420px] -translate-x-1/2 rounded-xl border border-cyan-400/25 bg-[#060b18]/90 p-4 text-slate-100 shadow-[0_18px_50px_rgba(0,0,0,0.72),0_0_28px_rgba(34,211,238,0.12)]"
         >
           {/* Tab Switcher + Minimize */}
           <div className="mb-3 flex items-center justify-between gap-2 border-b border-cyan-500/15 pb-2.5">
@@ -224,7 +242,7 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
                 onClick={() => switchTab('login')}
                 className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition whitespace-nowrap shrink-0 ${
                   tab === 'login'
-                    ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/40'
+                    ? 'border border-cyan-400/40 bg-cyan-500/20 text-cyan-200'
                     : 'text-slate-300 hover:text-white'
                 }`}
               >
@@ -238,7 +256,7 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
                 onClick={() => switchTab('register')}
                 className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition whitespace-nowrap shrink-0 ${
                   tab === 'register'
-                    ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/40'
+                    ? 'border border-cyan-400/40 bg-cyan-500/20 text-cyan-200'
                     : 'text-slate-300 hover:text-white'
                 }`}
               >
@@ -252,7 +270,7 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
                 onClick={() => switchTab('forgot')}
                 className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition whitespace-nowrap shrink-0 ${
                   tab === 'forgot'
-                    ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/40'
+                    ? 'border border-cyan-400/40 bg-cyan-500/20 text-cyan-200'
                     : 'text-slate-300 hover:text-white'
                 }`}
               >
@@ -273,10 +291,24 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
           {error && (
             <div
               role="alert"
-              className="mb-3 flex items-start gap-2 rounded-lg border border-rose-500/40 bg-rose-950/60 px-3 py-2 text-xs text-rose-200"
+              className="mb-3 rounded-lg border border-rose-500/40 bg-rose-950/60 px-3 py-2 text-xs text-rose-200"
             >
-              <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-400" aria-hidden="true" />
-              <span>{error}</span>
+              <div className="flex items-start gap-2">
+                <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-400" aria-hidden="true" />
+                <span>{error}</span>
+              </div>
+              {showQuickRegisterHint && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRegEmail(loginEmail.trim());
+                    switchTab('register');
+                  }}
+                  className="mt-1.5 text-[11px] font-semibold text-cyan-300 underline hover:text-cyan-200"
+                >
+                  Create a new account with {loginEmail.trim()} →
+                </button>
+              )}
             </div>
           )}
 
@@ -291,39 +323,32 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
 
           {tab === 'login' && (
             <form onSubmit={handleLogin} className="space-y-2.5">
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label htmlFor="login-username" className="mb-1 block text-xs font-medium text-slate-300">
-                    Username
-                  </label>
-                  <input
-                    id="login-username"
-                    type="text"
-                    autoComplete="username"
-                    value={loginUser}
-                    onChange={(e) => setLoginUser(e.target.value)}
-                    placeholder="Hunter name"
-                    className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
+              <div>
+                <label htmlFor="login-email" className="mb-1 block text-xs font-medium text-slate-300">
+                  Email Address
+                </label>
+                <div className="relative">
+                  <Mail
+                    className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                    aria-hidden="true"
                   />
-                </div>
-                <div>
-                  <label htmlFor="login-player-id" className="mb-1 block text-xs font-medium text-slate-300">
-                    Player ID
-                  </label>
                   <input
-                    id="login-player-id"
+                    id="login-email"
+                    data-testid="login-email"
                     type="text"
-                    value={loginPlayerId}
-                    onChange={(e) => setLoginPlayerId(e.target.value)}
-                    placeholder="e.g. YH-10001"
-                    className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
+                    autoComplete="email"
+                    value={loginEmail}
+                    onChange={(e) => setLoginEmail(e.target.value)}
+                    placeholder="hunter@example.com"
+                    className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] py-2 pl-9 pr-3 text-sm text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
                   />
                 </div>
               </div>
+
               <div>
                 <div className="mb-1 flex items-center justify-between">
                   <label htmlFor="login-password" className="text-xs font-medium text-slate-300">
-                    Password <span className="text-slate-500">(optional with Player ID)</span>
+                    Password
                   </label>
                   <button
                     type="button"
@@ -336,11 +361,12 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
                 <div className="relative">
                   <input
                     id="login-password"
+                    data-testid="login-password"
                     type={showLoginPass ? 'text' : 'password'}
                     autoComplete="current-password"
                     value={loginPass}
                     onChange={(e) => setLoginPass(e.target.value)}
-                    placeholder="Enter password"
+                    placeholder="Enter your password"
                     className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-3 py-2 pr-9 text-sm text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
                   />
                   <button
@@ -353,12 +379,38 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
                   </button>
                 </div>
               </div>
-              <p className="text-[11px] text-slate-400">
-                Sign in using Username + Player ID or Username + Password.
-              </p>
+
+              {useLegacyPlayerId && (
+                <div>
+                  <label htmlFor="login-player-id" className="mb-1 block text-xs font-medium text-slate-300">
+                    Player ID <span className="text-slate-500">(Legacy accounts)</span>
+                  </label>
+                  <input
+                    id="login-player-id"
+                    type="text"
+                    value={loginPlayerId}
+                    onChange={(e) => setLoginPlayerId(e.target.value)}
+                    placeholder="e.g. YH-10001"
+                    className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
+                  />
+                </div>
+              )}
+
+              <div className="flex items-center justify-between text-[11px] text-slate-400">
+                <span>Sign in with your email and password.</span>
+                <button
+                  type="button"
+                  onClick={() => setUseLegacyPlayerId((v) => !v)}
+                  className="text-cyan-300/90 hover:text-cyan-200"
+                >
+                  {useLegacyPlayerId ? 'Hide Player ID' : 'Use Player ID'}
+                </button>
+              </div>
+
               <button
                 type="submit"
                 disabled={loading}
+                data-testid="login-submit-btn"
                 className="w-full rounded-lg border border-cyan-400/50 bg-cyan-600/90 px-4 py-2 text-sm font-semibold text-white shadow-[0_0_20px_rgba(8,145,178,0.35)] transition hover:bg-cyan-500 disabled:opacity-50"
               >
                 {loading ? 'Signing In...' : 'Sign In'}
@@ -367,33 +419,25 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
           )}
 
           {tab === 'register' && (
-            <form onSubmit={handleRegister} className="max-h-[54vh] space-y-2.5 overflow-y-auto pr-1 yh-scroll">
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label htmlFor="reg-username" className="mb-1 block text-xs font-medium text-slate-300">
-                    Unique Username
-                  </label>
-                  <input
-                    id="reg-username"
-                    type="text"
-                    autoComplete="username"
-                    value={regUser}
-                    onChange={(e) => setRegUser(e.target.value)}
-                    placeholder="3–24 chars"
-                    className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
+            <form onSubmit={handleRegister} className="space-y-2.5">
+              <div>
+                <label htmlFor="reg-email" className="mb-1 block text-xs font-medium text-slate-300">
+                  Email Address
+                </label>
+                <div className="relative">
+                  <Mail
+                    className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                    aria-hidden="true"
                   />
-                </div>
-                <div>
-                  <label htmlFor="reg-player-id" className="mb-1 block text-xs font-medium text-slate-300">
-                    Player ID <span className="text-slate-500">(Optional)</span>
-                  </label>
                   <input
-                    id="reg-player-id"
-                    type="text"
-                    value={regPlayerId}
-                    onChange={(e) => setRegPlayerId(e.target.value)}
-                    placeholder="Auto or custom ID"
-                    className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
+                    id="reg-email"
+                    data-testid="reg-email"
+                    type="email"
+                    autoComplete="email"
+                    value={regEmail}
+                    onChange={(e) => setRegEmail(e.target.value)}
+                    placeholder="hunter@example.com"
+                    className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] py-1.5 pl-9 pr-3 text-sm text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
                   />
                 </div>
               </div>
@@ -405,6 +449,7 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
                   </label>
                   <input
                     id="reg-password"
+                    data-testid="reg-password"
                     type="password"
                     autoComplete="new-password"
                     value={regPass}
@@ -422,6 +467,7 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
                   </label>
                   <input
                     id="reg-confirm-password"
+                    data-testid="reg-confirm-password"
                     type="password"
                     autoComplete="new-password"
                     value={regConfirmPass}
@@ -433,71 +479,30 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
               </div>
 
               <div>
-                <span className="mb-1 block text-xs font-medium text-slate-300">
-                  Character Category
-                </span>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setRegGender('male')}
-                    aria-pressed={regGender === 'male'}
-                    className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
-                      regGender === 'male'
-                        ? 'border-cyan-400 bg-cyan-500/20 text-cyan-100'
-                        : 'border-slate-700 bg-[#0b1326] text-slate-300 hover:border-slate-500'
-                    }`}
-                  >
-                    Male Warrior
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setRegGender('female')}
-                    aria-pressed={regGender === 'female'}
-                    className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
-                      regGender === 'female'
-                        ? 'border-cyan-400 bg-cyan-500/20 text-cyan-100'
-                        : 'border-slate-700 bg-[#0b1326] text-slate-300 hover:border-slate-500'
-                    }`}
-                  >
-                    Female Warrior
-                  </button>
-                </div>
+                <label htmlFor="reg-recovery-a" className="mb-1 block text-xs font-medium text-slate-300">
+                  Secret Recovery Word <span className="text-slate-500">(Optional)</span>
+                </label>
+                <input
+                  id="reg-recovery-a"
+                  type="text"
+                  value={regRecoveryAnswer}
+                  onChange={(e) => setRegRecoveryAnswer(e.target.value)}
+                  placeholder="Optional backup word for password reset"
+                  className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
+                />
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label htmlFor="reg-recovery-q" className="mb-1 block text-xs font-medium text-slate-300">
-                    Recovery Question
-                  </label>
-                  <input
-                    id="reg-recovery-q"
-                    type="text"
-                    value={regRecoveryQuestion}
-                    onChange={(e) => setRegRecoveryQuestion(e.target.value)}
-                    className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-2.5 py-1.5 text-xs text-slate-200 focus:border-cyan-400 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="reg-recovery-a" className="mb-1 block text-xs font-medium text-slate-300">
-                    Recovery Answer
-                  </label>
-                  <input
-                    id="reg-recovery-a"
-                    type="text"
-                    value={regRecoveryAnswer}
-                    onChange={(e) => setRegRecoveryAnswer(e.target.value)}
-                    placeholder="Secret word"
-                    className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-2.5 py-1.5 text-xs text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
-                  />
-                </div>
-              </div>
+              <p className="text-[11px] text-slate-400">
+                After your first sign in, you will choose your Player Name and Gender.
+              </p>
 
               <button
                 type="submit"
                 disabled={loading}
+                data-testid="register-submit-btn"
                 className="w-full rounded-lg border border-cyan-400/50 bg-cyan-600/90 px-4 py-2 text-sm font-semibold text-white shadow-[0_0_20px_rgba(8,145,178,0.35)] transition hover:bg-cyan-500 disabled:opacity-50"
               >
-                {loading ? 'Creating Hunter...' : 'Create Account'}
+                {loading ? 'Creating Account...' : 'Create Account'}
               </button>
             </form>
           )}
@@ -506,15 +511,15 @@ export default function OpeningAuthScreen({ onAuthenticated }: OpeningAuthScreen
             <form onSubmit={handleResetPassword} className="space-y-2.5">
               <div>
                 <label htmlFor="forgot-username" className="mb-1 block text-xs font-medium text-slate-300">
-                  Hunter Username
+                  Account Email or Hunter Name
                 </label>
                 <div className="flex gap-2">
                   <input
                     id="forgot-username"
                     type="text"
-                    value={forgotUser}
-                    onChange={(e) => setForgotUser(e.target.value)}
-                    placeholder="Enter your username"
+                    value={forgotIdentifier}
+                    onChange={(e) => setForgotIdentifier(e.target.value)}
+                    placeholder="hunter@example.com"
                     className="w-full rounded-lg border border-slate-700/80 bg-[#0b1326] px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
                   />
                   <button

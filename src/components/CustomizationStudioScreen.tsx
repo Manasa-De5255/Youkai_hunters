@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { BookOpen, Lock, LogOut, Play, RotateCcw, RotateCw, Users } from 'lucide-react';
+import { BookOpen, Lock, LogOut, Play, RotateCcw, RotateCw, UserCog } from 'lucide-react';
 import {
   ARCHERY_OPTIONS,
   COSTUME_OPTIONS,
@@ -23,15 +23,17 @@ import CharacterStageCanvas from '../three/CharacterStageCanvas';
 import {
   CharacterCustomization,
   CustomizationCategoryKey,
+  Gender,
   PlayerAccount,
 } from '../types/game';
 import { FantasyCategoryIcon } from './FantasyIcons';
+import ProfileSettingsModal from './ProfileSettingsModal';
 
 interface CustomizationStudioScreenProps {
   player: PlayerAccount;
   customization: CharacterCustomization;
   onChangeCustomization: (next: CharacterCustomization) => void;
-  onSwitchGenderScreen: () => void;
+  onUpdateProfile: (username: string, gender: Gender) => Promise<void>;
   onSaveAndStartGame: () => Promise<void>;
   onLogout: () => void;
 }
@@ -40,10 +42,11 @@ export default function CustomizationStudioScreen({
   player,
   customization,
   onChangeCustomization,
-  onSwitchGenderScreen,
+  onUpdateProfile,
   onSaveAndStartGame,
   onLogout,
 }: CustomizationStudioScreenProps) {
+  const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
   const [activeCategory, setActiveCategory] = useState<CustomizationCategoryKey>(
     player.level >= 2 ? 'costume' : 'archery',
   );
@@ -215,11 +218,11 @@ export default function CustomizationStudioScreen({
 
           <button
             type="button"
-            onClick={onSwitchGenderScreen}
+            onClick={() => setProfileSettingsOpen(true)}
             className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-700 bg-[#0b1326] px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:border-cyan-400/50 hover:text-cyan-100"
           >
-            <Users className="h-3.5 w-3.5" aria-hidden="true" />
-            Switch Gender Category
+            <UserCog className="h-3.5 w-3.5" aria-hidden="true" />
+            Profile Settings
           </button>
         </div>
 
@@ -738,6 +741,14 @@ export default function CustomizationStudioScreen({
           {saving ? 'SAVING...' : 'START GAME'}
         </button>
       </div>
+
+      {profileSettingsOpen && (
+        <ProfileSettingsModal
+          player={player}
+          onSaveProfile={onUpdateProfile}
+          onClose={() => setProfileSettingsOpen(false)}
+        />
+      )}
     </main>
   );
 }

@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import CustomizationStudioScreen from './components/CustomizationStudioScreen';
 import GameWorldScreen from './components/GameWorldScreen';
-import GenderSelectionScreen from './components/GenderSelectionScreen';
 import OpeningAuthScreen from './components/OpeningAuthScreen';
+import ProfileSetupScreen from './components/ProfileSetupScreen';
 import { getDefaultCustomization } from './data/customizationCatalog';
+import { KodamaSpawnKind } from './data/kodamaChallenge';
 import { findLockedCustomizationError } from './data/progressionCatalog';
 import {
   ActivityId,
@@ -19,7 +20,7 @@ import {
   recordKodamaRound,
   recordPlayerProgress,
   updatePlayerCustomization,
-  updatePlayerGender,
+  updatePlayerProfile,
 } from './utils/apiClient';
 
 export default function App() {
@@ -29,11 +30,24 @@ export default function App() {
   const [draftCustomization, setDraftCustomization] = useState<CharacterCustomization>(() =>
     getDefaultCustomization('male'),
   );
+  const rewardedGhostKeysRef = useRef<Set<string>>(new Set());
 
   // Sync body state attribute for testability & clean transitions
   useEffect(() => {
     document.body.dataset.state = screen;
   }, [screen]);
+
+  const applyAuthenticatedPlayer = (authedPlayer: PlayerAccount) => {
+    rewardedGhostKeysRef.current.clear();
+    setPlayer(authedPlayer);
+    setDraftCustomization(
+      authedPlayer.gender === 'male'
+        ? authedPlayer.maleCustomization
+        : authedPlayer.femaleCustomization,
+    );
+    // Only ask for Player Name + Gender on first login; later logins load saved profile into gameplay
+    setScreen(authedPlayer.profileCompleted ? 'playing' : 'profile-setup');
+  };
 
   // Restore session on initial mount
   useEffect(() => {
@@ -41,13 +55,7 @@ export default function App() {
     fetchCurrentPlayer().then((existing) => {
       if (!active) return;
       if (existing) {
-        setPlayer(existing);
-        setDraftCustomization(
-          existing.gender === 'male'
-            ? existing.maleCustomization
-            : existing.femaleCustomization,
-        );
-        setScreen('gender-select');
+        applyAuthenticatedPlayer(existing);
       } else {
         setScreen('auth');
       }
@@ -59,18 +67,22 @@ export default function App() {
   }, []);
 
   const handleAuthenticated = (authedPlayer: PlayerAccount) => {
-    setPlayer(authedPlayer);
-    setDraftCustomization(
-      authedPlayer.gender === 'male'
-        ? authedPlayer.maleCustomization
-        : authedPlayer.femaleCustomization,
-    );
-    setScreen('gender-select');
+    applyAuthenticatedPlayer(authedPlayer);
   };
 
-  const handleSelectGender = async (gender: Gender) => {
+  const handleCompleteProfile = async (username: string, gender: Gender) => {
     if (!player) return;
-    const updated = await updatePlayerGender(gender);
+    const updated = await updatePlayerProfile({ username, gender });
+    setPlayer(updated);
+    setDraftCustomization(
+      updated.gender === 'male' ? updated.maleCustomization : updated.femaleCustomization,
+    );
+    setScreen('playing');
+  };
+
+  const handleUpdateProfileSettings = async (username: string, gender: Gender) => {
+    if (!player) return;
+    const updated = await updatePlayerProfile({ username, gender });
     setPlayer(updated);
     setDraftCustomization(
       updated.gender === 'male' ? updated.maleCustomization : updated.femaleCustomization,
@@ -124,8 +136,36 @@ export default function App() {
     };
   };
 
-  const handleKodamaHit = async () => {
-    const result = await recordKodamaHit();
+  const handleKodamaHit = async (kind: KodamaSpawnKind = 'wall', ghostKey = '') => {
+    const isUniqueKey = Boolean(ghostKey && !rewardedGhostKeysRef.current.has(ghostKey));
+    if (ghostKey) {
+      if (rewardedGhostKeysRef.current.has(ghostKey)) {
+        return {
+          leveledUp: false,
+          newLevel: player?.level ?? 1,
+          newlyUnlocked: [],
+          diamonds: player?.kodamaProgress.diamonds ?? 0,
+        };
+      }
+      rewardedGhostKeysRef.current.add(ghostKey);
+    }
+
+    // Immediate optimistic diamond update for running ghost kills
+    if (kind === 'crossing' && (!ghostKey || isUniqueKey)) {
+      setPlayer((prev) =>
+        prev
+          ? {
+              ...prev,
+              kodamaProgress: {
+                ...prev.kodamaProgress,
+                diamonds: prev.kodamaProgress.diamonds + 1,
+              },
+            }
+          : prev,
+      );
+    }
+
+    const result = await recordKodamaHit(kind, ghostKey || undefined);
     setPlayer(result.player);
     return {
       leveledUp: result.leveledUp,
@@ -133,6 +173,18 @@ export default function App() {
       newlyUnlocked: result.newlyUnlocked,
       diamonds: result.player.kodamaProgress.diamonds,
     };
+  };
+
+  const handleExitToMainMenu = async () => {
+    if (player) {
+      try {
+        const saved = await updatePlayerCustomization(player.gender, draftCustomization);
+        setPlayer(saved);
+      } catch {
+        // Diamonds & rounds already persist server-side after every hit/round
+      }
+    }
+    setScreen('customize');
   };
 
   const handleKodamaRoundComplete = async (round: number, hits: number) => {
@@ -149,6 +201,7 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    rewardedGhostKeysRef.current.clear();
     await logoutPlayerAccount().catch(() => undefined);
     setPlayer(null);
     setScreen('auth');
@@ -166,12 +219,11 @@ export default function App() {
     return <OpeningAuthScreen onAuthenticated={handleAuthenticated} />;
   }
 
-  if (screen === 'gender-select') {
+  if (screen === 'profile-setup') {
     return (
-      <GenderSelectionScreen
+      <ProfileSetupScreen
         player={player}
-        onSelectGender={handleSelectGender}
-        onProceedToCustomize={() => setScreen('customize')}
+        onCompleteProfile={handleCompleteProfile}
         onLogout={handleLogout}
       />
     );
@@ -183,7 +235,7 @@ export default function App() {
         player={player}
         customization={draftCustomization}
         onChangeCustomization={handleChangeCustomization}
-        onSwitchGenderScreen={() => setScreen('gender-select')}
+        onUpdateProfile={handleUpdateProfileSettings}
         onSaveAndStartGame={handleSaveAndStartGame}
         onLogout={handleLogout}
       />
@@ -197,7 +249,9 @@ export default function App() {
       onRecordActivity={handleRecordActivity}
       onKodamaHit={handleKodamaHit}
       onKodamaRoundComplete={handleKodamaRoundComplete}
+      onUpdateProfile={handleUpdateProfileSettings}
       onReturnToCustomize={() => setScreen('customize')}
+      onExitToMenu={handleExitToMainMenu}
       onLogout={handleLogout}
     />
   );

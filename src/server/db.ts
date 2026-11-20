@@ -15,14 +15,19 @@ import {
 } from '../data/progressionCatalog';
 import {
   applyRoundCompletion,
+  getDiamondRewardForGhost,
   KODAMA_TOTAL_ROUNDS,
+  KodamaSpawnKind,
   sanitizeKodamaProgress,
 } from '../data/kodamaChallenge';
 import { ActivityId, CharacterCustomization, Gender, PlayerAccount } from '../types/game';
 import {
+  normalizeEmail,
   normalizePlayerId,
+  normalizePlayerName,
   normalizeUsername,
   validatePasswordResetInput,
+  validatePlayerName,
   validateRegistrationInput,
 } from '../utils/authValidation';
 import {
@@ -75,12 +80,15 @@ export class YokaiDatabase implements YokaiStore {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         player_id TEXT NOT NULL UNIQUE,
         player_id_lower TEXT,
+        email TEXT,
+        email_lower TEXT,
         username TEXT NOT NULL,
         username_lower TEXT NOT NULL UNIQUE,
         password_hash TEXT NOT NULL,
         recovery_question TEXT NOT NULL,
         recovery_answer_hash TEXT NOT NULL,
         gender TEXT NOT NULL CHECK(gender IN ('male', 'female')),
+        profile_completed INTEGER NOT NULL DEFAULT 1,
         level INTEGER NOT NULL DEFAULT 1,
         xp INTEGER NOT NULL DEFAULT 0,
         orbs_cleared INTEGER NOT NULL DEFAULT 0,
@@ -100,6 +108,13 @@ export class YokaiDatabase implements YokaiStore {
         created_at TEXT NOT NULL,
         expires_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS rewarded_ghosts (
+        player_id TEXT NOT NULL REFERENCES players(player_id) ON DELETE CASCADE,
+        ghost_key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (player_id, ghost_key)
+      );
     `);
 
     const columns = this.db.prepare('PRAGMA table_info(players)').all() as { name: string }[];
@@ -107,6 +122,15 @@ export class YokaiDatabase implements YokaiStore {
 
     if (!colNames.has('player_id_lower')) {
       this.db.exec('ALTER TABLE players ADD COLUMN player_id_lower TEXT;');
+    }
+    if (!colNames.has('email')) {
+      this.db.exec('ALTER TABLE players ADD COLUMN email TEXT;');
+    }
+    if (!colNames.has('email_lower')) {
+      this.db.exec('ALTER TABLE players ADD COLUMN email_lower TEXT;');
+    }
+    if (!colNames.has('profile_completed')) {
+      this.db.exec('ALTER TABLE players ADD COLUMN profile_completed INTEGER NOT NULL DEFAULT 1;');
     }
     if (!colNames.has('level')) {
       this.db.exec('ALTER TABLE players ADD COLUMN level INTEGER NOT NULL DEFAULT 1;');
@@ -141,6 +165,9 @@ export class YokaiDatabase implements YokaiStore {
     this.db.exec(
       'CREATE UNIQUE INDEX IF NOT EXISTS idx_players_player_id_lower ON players(player_id_lower);',
     );
+    this.db.exec(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_players_email_lower ON players(email_lower) WHERE email_lower IS NOT NULL AND email_lower != '';",
+    );
   }
 
   close(): void {
@@ -148,19 +175,24 @@ export class YokaiDatabase implements YokaiStore {
   }
 
   registerPlayer(input: {
-    username: string;
+    email?: string;
+    username?: string;
     playerId?: string;
     password: string;
     confirmPassword: string;
-    gender: Gender;
+    gender?: Gender;
     recoveryQuestion?: string;
-    recoveryAnswer: string;
+    recoveryAnswer?: string;
   }):
     | { ok: true; player: PlayerAccount; sessionToken: string }
     | { ok: false; error: string; status: number } {
+    const requestedEmail = input.email ? normalizeEmail(input.email) : '';
     const requestedPlayerId = input.playerId ? normalizePlayerId(input.playerId) : '';
+    const requestedUsername = input.username ? normalizePlayerName(input.username) : '';
+
     const validation = validateRegistrationInput({
-      username: input.username,
+      email: requestedEmail || undefined,
+      username: requestedUsername || undefined,
       playerId: requestedPlayerId || undefined,
       password: input.password,
       confirmPassword: input.confirmPassword,
@@ -171,19 +203,45 @@ export class YokaiDatabase implements YokaiStore {
       return { ok: false, error: validation.error || 'Invalid registration data.', status: 400 };
     }
 
-    const username = normalizeUsername(input.username);
-    const usernameLower = username.toLowerCase();
-
-    const existingUsername = this.db
-      .prepare('SELECT player_id FROM players WHERE username_lower = ?')
-      .get(usernameLower);
-    if (existingUsername) {
-      return {
-        ok: false,
-        error: 'That username is already claimed by another hunter. Choose a unique username.',
-        status: 409,
-      };
+    if (requestedEmail) {
+      const existingEmail = this.db
+        .prepare('SELECT player_id FROM players WHERE email_lower = ?')
+        .get(requestedEmail);
+      if (existingEmail) {
+        return {
+          ok: false,
+          error: 'An account with that email address already exists. Please sign in instead.',
+          status: 409,
+        };
+      }
     }
+
+    const explicitProfileProvided =
+      Boolean(requestedUsername) && (input.gender === 'male' || input.gender === 'female');
+
+    let username = requestedUsername;
+    if (!username) {
+      username = `Hunter-${crypto.randomBytes(3).toString('hex')}`;
+      while (
+        this.db
+          .prepare('SELECT player_id FROM players WHERE username_lower = ?')
+          .get(username.toLowerCase())
+      ) {
+        username = `Hunter-${crypto.randomBytes(3).toString('hex')}`;
+      }
+    } else {
+      const existingUsername = this.db
+        .prepare('SELECT player_id FROM players WHERE username_lower = ?')
+        .get(username.toLowerCase());
+      if (existingUsername) {
+        return {
+          ok: false,
+          error: 'That player name is already claimed by another hunter. Choose a unique name.',
+          status: 409,
+        };
+      }
+    }
+    const usernameLower = username.toLowerCase();
 
     if (requestedPlayerId) {
       const requestedLower = requestedPlayerId.toLowerCase();
@@ -203,11 +261,19 @@ export class YokaiDatabase implements YokaiStore {
 
     const now = new Date().toISOString();
     const passwordHash = hashSecret(input.password);
-    const recoveryQuestion =
-      input.recoveryQuestion && input.recoveryQuestion.trim().length > 0
+    const hasCustomRecovery = Boolean(input.recoveryAnswer && input.recoveryAnswer.trim().length >= 2);
+    const recoveryQuestion = hasCustomRecovery
+      ? input.recoveryQuestion && input.recoveryQuestion.trim().length > 0
         ? input.recoveryQuestion.trim()
-        : 'Guardian Spirit Secret Word';
-    const recoveryAnswerHash = hashSecret(input.recoveryAnswer.trim().toLowerCase());
+        : 'Guardian Spirit Secret Word'
+      : 'Guardian Spirit Secret Word';
+    const recoveryAnswerHash = hashSecret(
+      hasCustomRecovery
+        ? input.recoveryAnswer!.trim().toLowerCase()
+        : crypto.randomUUID(),
+    );
+    const assignedGender: Gender = input.gender === 'female' ? 'female' : 'male';
+    const profileCompleted = explicitProfileProvided ? 1 : 0;
     const maleJson = JSON.stringify(getDefaultCustomization('male'));
     const femaleJson = JSON.stringify(getDefaultCustomization('female'));
     const starterUnlockedJson = JSON.stringify(getUnlockedItemsForLevel(1));
@@ -215,11 +281,11 @@ export class YokaiDatabase implements YokaiStore {
     const tempId = `YH-PENDING-${crypto.randomUUID()}`;
     const insert = this.db.prepare(`
       INSERT INTO players (
-        player_id, player_id_lower, username, username_lower, password_hash,
-        recovery_question, recovery_answer_hash, gender,
+        player_id, player_id_lower, email, email_lower, username, username_lower, password_hash,
+        recovery_question, recovery_answer_hash, gender, profile_completed,
         level, xp, orbs_cleared, unlocked_items,
         male_customization, female_customization, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const tx = this.db.transaction(() => {
@@ -227,12 +293,15 @@ export class YokaiDatabase implements YokaiStore {
       const info = insert.run(
         initialId,
         initialId.toLowerCase(),
+        requestedEmail || null,
+        requestedEmail || null,
         username,
         usernameLower,
         passwordHash,
         recoveryQuestion,
         recoveryAnswerHash,
-        input.gender,
+        assignedGender,
+        profileCompleted,
         1,
         0,
         0,
@@ -274,30 +343,43 @@ export class YokaiDatabase implements YokaiStore {
   }
 
   loginPlayer(input: {
-    username: string;
+    email?: string;
+    username?: string;
     playerId?: string;
     password?: string;
   }):
     | { ok: true; player: PlayerAccount; sessionToken: string }
     | { ok: false; error: string; status: number } {
-    const usernameLower = normalizeUsername(input.username ?? '').toLowerCase();
+    const rawIdentifier = (input.email || input.username || '').trim();
+    const identifierLower = rawIdentifier.toLowerCase();
     const cleanPlayerId = normalizePlayerId(input.playerId ?? '');
     const cleanPassword = typeof input.password === 'string' ? input.password : '';
 
-    if (!usernameLower || (!cleanPlayerId && !cleanPassword)) {
+    if (!identifierLower || (!cleanPlayerId && !cleanPassword)) {
       return {
         ok: false,
-        error: 'Enter your username along with your Player ID or password.',
+        error: 'Enter your email (or hunter name) along with your password or Player ID.',
         status: 400,
       };
     }
 
-    const row = (this.db
-      .prepare('SELECT * FROM players WHERE username_lower = ?')
-      .get(usernameLower) ??
-      this.db
-        .prepare('SELECT * FROM players WHERE LOWER(TRIM(username)) = ?')
-        .get(usernameLower)) as PlayerRow | undefined;
+    let row: PlayerRow | undefined;
+    if (input.email || identifierLower.includes('@')) {
+      row = this.db
+        .prepare('SELECT * FROM players WHERE email_lower = ?')
+        .get(identifierLower) as PlayerRow | undefined;
+    }
+    if (!row) {
+      row = (this.db
+        .prepare('SELECT * FROM players WHERE username_lower = ?')
+        .get(identifierLower) ??
+        this.db
+          .prepare('SELECT * FROM players WHERE LOWER(TRIM(username)) = ?')
+          .get(identifierLower) ??
+        this.db
+          .prepare('SELECT * FROM players WHERE email_lower = ?')
+          .get(identifierLower)) as PlayerRow | undefined;
+    }
 
     if (!row) {
       return {
@@ -310,7 +392,7 @@ export class YokaiDatabase implements YokaiStore {
     if (cleanPlayerId && row.player_id.trim().toLowerCase() !== cleanPlayerId.toLowerCase()) {
       return {
         ok: false,
-        error: 'Player ID does not match the registered hunter username.',
+        error: 'Player ID does not match the registered hunter account.',
         status: 401,
       };
     }
@@ -318,7 +400,7 @@ export class YokaiDatabase implements YokaiStore {
     if (cleanPassword && !verifySecret(cleanPassword, row.password_hash)) {
       return {
         ok: false,
-        error: 'Invalid username or password.',
+        error: 'Invalid email/username or password.',
         status: 401,
       };
     }
@@ -328,20 +410,20 @@ export class YokaiDatabase implements YokaiStore {
   }
 
   getRecoveryQuestion(
-    username: string,
+    identifier: string,
   ): { ok: true; question: string } | { ok: false; error: string; status: number } {
-    const usernameLower = normalizeUsername(username).toLowerCase();
-    if (!usernameLower) {
-      return { ok: false, error: 'Enter your username first.', status: 400 };
+    const cleanLower = normalizeUsername(identifier).toLowerCase();
+    if (!cleanLower) {
+      return { ok: false, error: 'Enter your email or username first.', status: 400 };
     }
     const row = (this.db
-      .prepare('SELECT recovery_question FROM players WHERE username_lower = ?')
-      .get(usernameLower) ??
+      .prepare('SELECT recovery_question FROM players WHERE email_lower = ? OR username_lower = ?')
+      .get(cleanLower, cleanLower) ??
       this.db
         .prepare('SELECT recovery_question FROM players WHERE LOWER(TRIM(username)) = ?')
-        .get(usernameLower)) as { recovery_question: string } | undefined;
+        .get(cleanLower)) as { recovery_question: string } | undefined;
     if (!row) {
-      return { ok: false, error: 'No hunter account found with that username.', status: 404 };
+      return { ok: false, error: 'No hunter account found with that email or username.', status: 404 };
     }
     return { ok: true, question: row.recovery_question };
   }
@@ -357,16 +439,16 @@ export class YokaiDatabase implements YokaiStore {
       return { ok: false, error: check.error || 'Invalid reset details.', status: 400 };
     }
 
-    const usernameLower = normalizeUsername(input.username).toLowerCase();
+    const cleanLower = normalizeUsername(input.username).toLowerCase();
     const row = (this.db
-      .prepare('SELECT * FROM players WHERE username_lower = ?')
-      .get(usernameLower) ??
+      .prepare('SELECT * FROM players WHERE email_lower = ? OR username_lower = ?')
+      .get(cleanLower, cleanLower) ??
       this.db
         .prepare('SELECT * FROM players WHERE LOWER(TRIM(username)) = ?')
-        .get(usernameLower)) as PlayerRow | undefined;
+        .get(cleanLower)) as PlayerRow | undefined;
 
     if (!row) {
-      return { ok: false, error: 'No hunter account found with that username.', status: 404 };
+      return { ok: false, error: 'No hunter account found with that email or username.', status: 404 };
     }
 
     const normalizedAnswer = input.recoveryAnswer.trim().toLowerCase();
@@ -430,6 +512,50 @@ export class YokaiDatabase implements YokaiStore {
       .prepare('SELECT * FROM players WHERE player_id = ?')
       .get(playerId) as PlayerRow | undefined;
     return row ? rowToPlayerAccount(row) : null;
+  }
+
+  updatePlayerProfile(
+    playerId: string,
+    input: { username: string; gender: Gender },
+  ):
+    | { ok: true; player: PlayerAccount }
+    | { ok: false; error: string; status: number } {
+    const nameCheck = validatePlayerName(input.username ?? '');
+    if (!nameCheck.valid) {
+      return { ok: false, error: nameCheck.error || 'Invalid player name.', status: 400 };
+    }
+    if (input.gender !== 'male' && input.gender !== 'female') {
+      return { ok: false, error: 'Please choose Male or Female.', status: 400 };
+    }
+
+    const cleanName = normalizePlayerName(input.username);
+    const cleanLower = cleanName.toLowerCase();
+
+    const conflict = this.db
+      .prepare('SELECT player_id FROM players WHERE username_lower = ? AND player_id != ?')
+      .get(cleanLower, playerId);
+    if (conflict) {
+      return {
+        ok: false,
+        error: 'That player name is already claimed by another hunter. Choose another name.',
+        status: 409,
+      };
+    }
+
+    const now = new Date().toISOString();
+    const res = this.db
+      .prepare(
+        'UPDATE players SET username = ?, username_lower = ?, gender = ?, profile_completed = 1, updated_at = ? WHERE player_id = ?',
+      )
+      .run(cleanName, cleanLower, input.gender, now, playerId);
+    if (res.changes === 0) {
+      return { ok: false, error: 'Player account not found.', status: 404 };
+    }
+
+    const updated = this.db
+      .prepare('SELECT * FROM players WHERE player_id = ?')
+      .get(playerId) as PlayerRow;
+    return { ok: true, player: rowToPlayerAccount(updated) };
   }
 
   updatePlayerCustomization(
@@ -552,64 +678,108 @@ export class YokaiDatabase implements YokaiStore {
     };
   }
 
-  awardKodamaHit(playerId: string):
+  awardKodamaHit(
+    playerId: string,
+    kind: KodamaSpawnKind = 'wall',
+    ghostKey?: string,
+  ):
     | {
         ok: true;
         player: PlayerAccount;
         leveledUp: boolean;
         newlyUnlocked: string[];
+        diamondAwarded: number;
+        alreadyRewarded: boolean;
       }
     | { ok: false; error: string; status: number } {
     const archeryDef = ACTIVITY_DEFINITIONS.find((a) => a.id === 'archery')!;
-    const row = this.db
-      .prepare('SELECT * FROM players WHERE player_id = ?')
-      .get(playerId) as PlayerRow | undefined;
-    if (!row) {
-      return { ok: false, error: 'Player account not found.', status: 404 };
-    }
+    const cleanKey = ghostKey && ghostKey.trim() ? ghostKey.trim().slice(0, 128) : '';
 
-    const currentXp = Math.max(0, Math.floor(Number(row.xp ?? 0)));
-    const currentLevel = Math.max(1, getLevelFromXp(currentXp), Math.floor(Number(row.level ?? 1)));
-    const existingUnlocked = getUnlockedItemsForLevel(
-      currentLevel,
-      parseUnlockedItems(row.unlocked_items),
-    );
-    const nextXp = currentXp + archeryDef.xpPerHit;
-    const nextLevel = Math.max(currentLevel, getLevelFromXp(nextXp));
-    const nextOrbsCleared = Math.max(0, Math.floor(Number(row.orbs_cleared ?? 0))) + 1;
-    const nextDiamonds = Math.max(0, Math.floor(Number(row.diamonds ?? 0))) + 1;
-    const nextUnlocked = getUnlockedItemsForLevel(nextLevel, existingUnlocked);
+    const tx = this.db.transaction(() => {
+      const row = this.db
+        .prepare('SELECT * FROM players WHERE player_id = ?')
+        .get(playerId) as PlayerRow | undefined;
+      if (!row) {
+        return { ok: false as const, error: 'Player account not found.', status: 404 };
+      }
 
-    const existingSet = new Set(existingUnlocked);
-    const newlyUnlocked = nextUnlocked.filter((item) => !existingSet.has(item));
-    const leveledUp = nextLevel > currentLevel;
-    const now = new Date().toISOString();
+      const now = new Date().toISOString();
+      const baseDiamondGain = getDiamondRewardForGhost(kind);
+      let alreadyRewarded = false;
+      let diamondGain = baseDiamondGain;
 
-    this.db
-      .prepare(
-        `UPDATE players
-         SET level = ?, xp = ?, orbs_cleared = ?, unlocked_items = ?, diamonds = ?, updated_at = ?
-         WHERE player_id = ?`,
-      )
-      .run(
-        nextLevel,
-        nextXp,
-        nextOrbsCleared,
-        JSON.stringify(nextUnlocked),
-        nextDiamonds,
-        now,
-        playerId,
+      if (cleanKey) {
+        const insertReward = this.db
+          .prepare(
+            'INSERT OR IGNORE INTO rewarded_ghosts (player_id, ghost_key, created_at) VALUES (?, ?, ?)',
+          )
+          .run(playerId, cleanKey, now);
+        if (insertReward.changes === 0) {
+          alreadyRewarded = true;
+          diamondGain = 0;
+          return {
+            ok: true as const,
+            player: rowToPlayerAccount(row),
+            leveledUp: false,
+            newlyUnlocked: [],
+            diamondAwarded: 0,
+            alreadyRewarded: true,
+          };
+        }
+      } else if (baseDiamondGain > 0) {
+        this.db
+          .prepare(
+            'INSERT OR IGNORE INTO rewarded_ghosts (player_id, ghost_key, created_at) VALUES (?, ?, ?)',
+          )
+          .run(playerId, `anon:${crypto.randomUUID()}`, now);
+      }
+
+      const currentXp = Math.max(0, Math.floor(Number(row.xp ?? 0)));
+      const currentLevel = Math.max(1, getLevelFromXp(currentXp), Math.floor(Number(row.level ?? 1)));
+      const existingUnlocked = getUnlockedItemsForLevel(
+        currentLevel,
+        parseUnlockedItems(row.unlocked_items),
       );
+      const nextXp = currentXp + archeryDef.xpPerHit;
+      const nextLevel = Math.max(currentLevel, getLevelFromXp(nextXp));
+      const nextOrbsCleared = Math.max(0, Math.floor(Number(row.orbs_cleared ?? 0))) + 1;
+      const nextDiamonds = Math.max(0, Math.floor(Number(row.diamonds ?? 0))) + diamondGain;
+      const nextUnlocked = getUnlockedItemsForLevel(nextLevel, existingUnlocked);
 
-    const updated = this.db
-      .prepare('SELECT * FROM players WHERE player_id = ?')
-      .get(playerId) as PlayerRow;
-    return {
-      ok: true,
-      player: rowToPlayerAccount(updated),
-      leveledUp,
-      newlyUnlocked,
-    };
+      const existingSet = new Set(existingUnlocked);
+      const newlyUnlocked = nextUnlocked.filter((item) => !existingSet.has(item));
+      const leveledUp = nextLevel > currentLevel;
+
+      this.db
+        .prepare(
+          `UPDATE players
+           SET level = ?, xp = ?, orbs_cleared = ?, unlocked_items = ?, diamonds = ?, updated_at = ?
+           WHERE player_id = ?`,
+        )
+        .run(
+          nextLevel,
+          nextXp,
+          nextOrbsCleared,
+          JSON.stringify(nextUnlocked),
+          nextDiamonds,
+          now,
+          playerId,
+        );
+
+      const updated = this.db
+        .prepare('SELECT * FROM players WHERE player_id = ?')
+        .get(playerId) as PlayerRow;
+      return {
+        ok: true as const,
+        player: rowToPlayerAccount(updated),
+        leveledUp,
+        newlyUnlocked,
+        diamondAwarded: diamondGain,
+        alreadyRewarded,
+      };
+    });
+
+    return tx();
   }
 
   completeKodamaRound(

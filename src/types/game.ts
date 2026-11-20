@@ -88,8 +88,10 @@ export interface KodamaChallengeProgress {
 
 export interface PlayerAccount {
   playerId: string;
+  email?: string | null;
   username: string;
   gender: Gender;
+  profileCompleted: boolean;
   level: number;
   xp: number;
   orbsCleared: number;
@@ -102,4 +104,4 @@ export interface PlayerAccount {
   updatedAt: string;
 }
 
-export type AppScreen = 'auth' | 'gender-select' | 'customize' | 'playing';
+export type AppScreen = 'auth' | 'profile-setup' | 'customize' | 'playing';

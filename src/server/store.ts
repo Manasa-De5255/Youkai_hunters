@@ -1,19 +1,22 @@
 import crypto from 'node:crypto';
 import { enforceCustomizationProgression } from '../data/progressionCatalog';
 import { getLevelFromXp, getUnlockedItemsForLevel } from '../data/progressionCatalog';
-import { sanitizeKodamaProgress } from '../data/kodamaChallenge';
+import { KodamaSpawnKind, sanitizeKodamaProgress } from '../data/kodamaChallenge';
 import { ActivityId, CharacterCustomization, Gender, PlayerAccount } from '../types/game';
 
 export interface PlayerRow {
   id: number;
   player_id: string;
   player_id_lower?: string | null;
+  email?: string | null;
+  email_lower?: string | null;
   username: string;
   username_lower: string;
   password_hash: string;
   recovery_question: string;
   recovery_answer_hash: string;
   gender: Gender;
+  profile_completed?: number | boolean;
   level?: number;
   xp?: number;
   orbs_cleared?: number;
@@ -31,20 +34,22 @@ export type MaybePromise<T> = T | Promise<T>;
 
 export interface YokaiStore {
   registerPlayer(input: {
-    username: string;
+    email?: string;
+    username?: string;
     playerId?: string;
     password: string;
     confirmPassword: string;
-    gender: Gender;
+    gender?: Gender;
     recoveryQuestion?: string;
-    recoveryAnswer: string;
+    recoveryAnswer?: string;
   }): MaybePromise<
     | { ok: true; player: PlayerAccount; sessionToken: string }
     | { ok: false; error: string; status: number }
   >;
 
   loginPlayer(input: {
-    username: string;
+    email?: string;
+    username?: string;
     playerId?: string;
     password?: string;
   }): MaybePromise<
@@ -53,7 +58,7 @@ export interface YokaiStore {
   >;
 
   getRecoveryQuestion(
-    username: string,
+    identifier: string,
   ): MaybePromise<{ ok: true; question: string } | { ok: false; error: string; status: number }>;
 
   resetPassword(input: {
@@ -68,6 +73,14 @@ export interface YokaiStore {
   deleteSession(token: string | undefined): MaybePromise<void>;
 
   updatePlayerGender(playerId: string, gender: Gender): MaybePromise<PlayerAccount | null>;
+
+  updatePlayerProfile(
+    playerId: string,
+    input: { username: string; gender: Gender },
+  ): MaybePromise<
+    | { ok: true; player: PlayerAccount }
+    | { ok: false; error: string; status: number }
+  >;
 
   updatePlayerCustomization(
     playerId: string,
@@ -91,12 +104,18 @@ export interface YokaiStore {
     | { ok: false; error: string; status: number }
   >;
 
-  awardKodamaHit(playerId: string): MaybePromise<
+  awardKodamaHit(
+    playerId: string,
+    kind?: KodamaSpawnKind,
+    ghostKey?: string,
+  ): MaybePromise<
     | {
         ok: true;
         player: PlayerAccount;
         leveledUp: boolean;
         newlyUnlocked: string[];
+        diamondAwarded: number;
+        alreadyRewarded: boolean;
       }
     | { ok: false; error: string; status: number }
   >;
@@ -187,8 +206,11 @@ export function rowToPlayerAccount(row: PlayerRow): PlayerAccount {
 
   return {
     playerId: row.player_id,
+    email: row.email ?? null,
     username: row.username,
     gender: row.gender,
+    profileCompleted:
+      row.profile_completed === undefined ? true : Boolean(row.profile_completed),
     level,
     xp,
     orbsCleared,

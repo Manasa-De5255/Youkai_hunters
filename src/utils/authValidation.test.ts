@@ -1,16 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  validateEmail,
   validatePasswordResetInput,
   validatePlayerId,
+  validatePlayerName,
   validateRegistrationInput,
   validateUsername,
 } from './authValidation';
 
-test('validateUsername and validatePlayerId enforce length and allowed characters', () => {
+test('validateUsername, validatePlayerName, validateEmail, and validatePlayerId enforce constraints', () => {
   assert.equal(validateUsername('ab').valid, false);
   assert.equal(validateUsername('Kenshin_01').valid, true);
   assert.equal(validateUsername('bad name!').valid, false);
+
+  assert.equal(validatePlayerName('A').valid, false);
+  assert.equal(validatePlayerName('Kenshin Oda').valid, true);
+  assert.equal(validatePlayerName('bad@name').valid, false);
+
+  assert.equal(validateEmail('').valid, false);
+  assert.equal(validateEmail('not-an-email').valid, false);
+  assert.equal(validateEmail('Hunter@Example.com').valid, true);
 
   assert.equal(validatePlayerId('A').valid, false);
   assert.equal(validatePlayerId('YH-9901').valid, true);
@@ -18,7 +28,21 @@ test('validateUsername and validatePlayerId enforce length and allowed character
   assert.equal(validatePlayerId('bad id!').valid, false);
 });
 
-test('validateRegistrationInput catches mismatched passwords, invalid playerId, and missing gender', () => {
+test('validateRegistrationInput supports email-only registration and validates legacy username registration', () => {
+  const emailOnlyValid = validateRegistrationInput({
+    email: 'archer@yokai.jp',
+    password: 'password123',
+    confirmPassword: 'password123',
+  });
+  assert.equal(emailOnlyValid.valid, true);
+
+  const badEmail = validateRegistrationInput({
+    email: 'bad-email',
+    password: 'password123',
+    confirmPassword: 'password123',
+  });
+  assert.equal(badEmail.valid, false);
+
   const mismatch = validateRegistrationInput({
     username: 'Kenshin',
     password: 'password123',
@@ -58,7 +82,7 @@ test('validateRegistrationInput catches mismatched passwords, invalid playerId, 
   assert.equal(valid.valid, true);
 });
 
-test('validatePasswordResetInput checks recovery answer and password match', () => {
+test('validatePasswordResetInput checks recovery answer and password match for email or username', () => {
   assert.equal(
     validatePasswordResetInput({
       username: 'Kenshin',
@@ -70,7 +94,7 @@ test('validatePasswordResetInput checks recovery answer and password match', () 
   );
   assert.equal(
     validatePasswordResetInput({
-      username: 'Kenshin',
+      username: 'archer@yokai.jp',
       recoveryAnswer: 'silver fox',
       newPassword: 'newpassword1',
       confirmNewPassword: 'newpassword1',

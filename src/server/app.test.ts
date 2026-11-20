@@ -128,5 +128,128 @@ test('API app handles registration, login, recovery, CORS preflight, and malform
       }),
     });
     assert.equal(loginNewPassRes.status, 200);
+    const loginNewPassJson = (await loginNewPassRes.json()) as { sessionToken: string };
+
+    // 8. Kodama hit API awards 0 diamonds for wall ghost, +1 diamond for crossing ghost, and deduplicates by ghostKey
+    const wallHitRes = await fetch(`${baseUrl}/api/player/kodama/hit`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${loginNewPassJson.sessionToken}`,
+      },
+      body: JSON.stringify({ kind: 'wall', ghostKey: 'r1:wall-0' }),
+    });
+    assert.equal(wallHitRes.status, 200);
+    const wallHitJson = (await wallHitRes.json()) as {
+      diamondAwarded: number;
+      player: { kodamaProgress: { diamonds: number } };
+    };
+    assert.equal(wallHitJson.diamondAwarded, 0);
+    assert.equal(wallHitJson.player.kodamaProgress.diamonds, 0);
+
+    const crossingHitRes = await fetch(`${baseUrl}/api/player/kodama/hit`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${loginNewPassJson.sessionToken}`,
+      },
+      body: JSON.stringify({ kind: 'crossing', ghostKey: 'r1:crossing-0' }),
+    });
+    assert.equal(crossingHitRes.status, 200);
+    const crossingHitJson = (await crossingHitRes.json()) as {
+      diamondAwarded: number;
+      alreadyRewarded: boolean;
+      player: { kodamaProgress: { diamonds: number } };
+    };
+    assert.equal(crossingHitJson.diamondAwarded, 1);
+    assert.equal(crossingHitJson.alreadyRewarded, false);
+    assert.equal(crossingHitJson.player.kodamaProgress.diamonds, 1);
+
+    // Replaying the exact same ghostKey does not grant a second diamond
+    const dupCrossingRes = await fetch(`${baseUrl}/api/player/kodama/hit`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${loginNewPassJson.sessionToken}`,
+      },
+      body: JSON.stringify({ kind: 'crossing', ghostKey: 'r1:crossing-0' }),
+    });
+    assert.equal(dupCrossingRes.status, 200);
+    const dupCrossingJson = (await dupCrossingRes.json()) as {
+      diamondAwarded: number;
+      alreadyRewarded: boolean;
+      player: { kodamaProgress: { diamonds: number } };
+    };
+    assert.equal(dupCrossingJson.diamondAwarded, 0);
+    assert.equal(dupCrossingJson.alreadyRewarded, true);
+    assert.equal(dupCrossingJson.player.kodamaProgress.diamonds, 1);
+  });
+});
+
+test('API app supports Email registration, PUT /api/player/profile, and Email re-login with persistent diamonds', async () => {
+  await withTestServer(async (baseUrl) => {
+    const regRes = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'spirit.archer@vercel.test',
+        password: 'Password123',
+        confirmPassword: 'Password123',
+      }),
+    });
+    assert.equal(regRes.status, 201);
+    const regJson = (await regRes.json()) as {
+      sessionToken: string;
+      player: { email: string; profileCompleted: boolean };
+    };
+    assert.equal(regJson.player.email, 'spirit.archer@vercel.test');
+    assert.equal(regJson.player.profileCompleted, false);
+
+    const profileRes = await fetch(`${baseUrl}/api/player/profile`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${regJson.sessionToken}`,
+      },
+      body: JSON.stringify({ username: 'HanaSpirit', gender: 'female' }),
+    });
+    assert.equal(profileRes.status, 200);
+    const profileJson = (await profileRes.json()) as {
+      player: { username: string; gender: string; profileCompleted: boolean };
+    };
+    assert.equal(profileJson.player.username, 'HanaSpirit');
+    assert.equal(profileJson.player.gender, 'female');
+    assert.equal(profileJson.player.profileCompleted, true);
+
+    await fetch(`${baseUrl}/api/player/kodama/hit`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${regJson.sessionToken}`,
+      },
+      body: JSON.stringify({ kind: 'crossing', ghostKey: 'r1:crossing-first' }),
+    });
+
+    const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'spirit.archer@vercel.test',
+        password: 'Password123',
+      }),
+    });
+    assert.equal(loginRes.status, 200);
+    const loginJson = (await loginRes.json()) as {
+      player: {
+        username: string;
+        gender: string;
+        profileCompleted: boolean;
+        kodamaProgress: { diamonds: number };
+      };
+    };
+    assert.equal(loginJson.player.profileCompleted, true);
+    assert.equal(loginJson.player.username, 'HanaSpirit');
+    assert.equal(loginJson.player.gender, 'female');
+    assert.equal(loginJson.player.kodamaProgress.diamonds, 1);
   });
 });

@@ -168,6 +168,30 @@ export function createCrimsonAuraTexture(): THREE.CanvasTexture {
   return tex;
 }
 
+export function createDiamondAuraTexture(): THREE.CanvasTexture {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const grad = ctx.createRadialGradient(
+    size * 0.5,
+    size * 0.5,
+    size * 0.02,
+    size * 0.5,
+    size * 0.5,
+    size * 0.5,
+  );
+  grad.addColorStop(0, 'rgba(34, 211, 238, 0.72)');
+  grad.addColorStop(0.48, 'rgba(14, 165, 233, 0.34)');
+  grad.addColorStop(1, 'rgba(6, 24, 34, 0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 export function createForestGroundTexture(): THREE.CanvasTexture {
   const size = 512;
   const canvas = document.createElement('canvas');

@@ -1,3 +1,4 @@
+import { KodamaSpawnKind } from '../data/kodamaChallenge';
 import { ActivityId, CharacterCustomization, Gender, PlayerAccount } from '../types/game';
 
 const SESSION_STORAGE_KEY = 'yh_session_token';
@@ -96,13 +97,14 @@ export async function fetchCurrentPlayer(): Promise<PlayerAccount | null> {
 }
 
 export async function registerPlayerAccount(payload: {
-  username: string;
+  email?: string;
+  username?: string;
   playerId?: string;
   password: string;
   confirmPassword: string;
-  gender: Gender;
-  recoveryQuestion: string;
-  recoveryAnswer: string;
+  gender?: Gender;
+  recoveryQuestion?: string;
+  recoveryAnswer?: string;
 }): Promise<PlayerAccount> {
   const data = await requestJson<{ player: PlayerAccount; sessionToken?: string }>(
     '/api/auth/register',
@@ -119,7 +121,8 @@ export async function registerPlayerAccount(payload: {
 }
 
 export async function loginPlayerAccount(payload: {
-  username: string;
+  email?: string;
+  username?: string;
   playerId?: string;
   password?: string;
 }): Promise<PlayerAccount> {
@@ -174,6 +177,17 @@ export async function updatePlayerGender(gender: Gender): Promise<PlayerAccount>
   return data.player;
 }
 
+export async function updatePlayerProfile(payload: {
+  username: string;
+  gender: Gender;
+}): Promise<PlayerAccount> {
+  const data = await requestJson<{ player: PlayerAccount }>('/api/player/profile', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+  return data.player;
+}
+
 export async function updatePlayerCustomization(
   gender: Gender,
   customization: CharacterCustomization,
@@ -200,18 +214,25 @@ export async function recordPlayerProgress(activityId: ActivityId): Promise<{
   });
 }
 
-export async function recordKodamaHit(): Promise<{
+export async function recordKodamaHit(
+  kind: KodamaSpawnKind = 'wall',
+  ghostKey?: string,
+): Promise<{
   player: PlayerAccount;
   leveledUp: boolean;
   newlyUnlocked: string[];
+  diamondAwarded: number;
+  alreadyRewarded: boolean;
 }> {
   return requestJson<{
     player: PlayerAccount;
     leveledUp: boolean;
     newlyUnlocked: string[];
+    diamondAwarded: number;
+    alreadyRewarded: boolean;
   }>('/api/player/kodama/hit', {
     method: 'POST',
-    body: JSON.stringify({}),
+    body: JSON.stringify({ kind, ghostKey }),
   });
 }
 

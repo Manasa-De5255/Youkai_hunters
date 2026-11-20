@@ -9,13 +9,16 @@ import {
   KodamaHitCheckState,
   KodamaRoundHudSnapshot,
   KodamaRoundOutcome,
+  KodamaSpawnKind,
   KodamaSpawnSpec,
   shouldAwardGhostHit,
 } from '../data/kodamaChallenge';
 import { isActivityUnlocked, isGadgetUnlocked } from '../data/progressionCatalog';
 import { ActivityId, CharacterCustomization, Gender } from '../types/game';
+import { sanctuaryAudio } from '../utils/sanctuaryAudio';
 import {
   createCrimsonAuraTexture,
+  createDiamondAuraTexture,
   createForestGroundTexture,
   createKodamaGhostRig,
   createMistTexture,
@@ -34,7 +37,8 @@ interface SanctuaryGameCanvasProps {
   round: number;
   stage: 1 | 2;
   roundRunKey: number;
-  onKodamaHit?: () => void;
+  paused?: boolean;
+  onKodamaHit?: (kind: KodamaSpawnKind, ghostKey: string) => void;
   onRoundStatsChange?: (snapshot: KodamaRoundHudSnapshot) => void;
   onRoundFinished?: (outcome: KodamaRoundOutcome) => void;
   onActivityHit?: (activityId: ActivityId) => void;
@@ -75,6 +79,7 @@ interface RoundEngineState {
   round: number;
   stage: 1 | 2;
   runKey: number;
+  runInstanceId: string;
   plan: KodamaSpawnSpec[];
   spawnIndex: number;
   spawnTimer: number;
@@ -92,6 +97,7 @@ export default function SanctuaryGameCanvas({
   round,
   stage,
   roundRunKey,
+  paused = false,
   onKodamaHit,
   onRoundStatsChange,
   onRoundFinished,
@@ -105,10 +111,13 @@ export default function SanctuaryGameCanvas({
   const warriorRef = useRef<WarriorCharacter3D | null>(null);
 
   const playerLevelRef = useRef(playerLevel);
+  const genderRef = useRef(gender);
   const activeActivityRef = useRef(activeActivity);
   const talismanActiveRef = useRef(talismanActive);
   const customizationRef = useRef(customization);
+  const pausedRef = useRef(paused);
   const roundPropRef = useRef({ round, stage, roundRunKey });
+  const keysRef = useRef<Set<string> | null>(null);
 
   const onKodamaHitRef = useRef(onKodamaHit);
   const onRoundStatsChangeRef = useRef(onRoundStatsChange);
@@ -120,9 +129,11 @@ export default function SanctuaryGameCanvas({
   const onLockedAttemptRef = useRef(onLockedAttempt);
 
   playerLevelRef.current = playerLevel;
+  genderRef.current = gender;
   activeActivityRef.current = activeActivity;
   talismanActiveRef.current = talismanActive;
   customizationRef.current = customization;
+  pausedRef.current = paused;
   roundPropRef.current = { round, stage, roundRunKey };
   onKodamaHitRef.current = onKodamaHit;
   onRoundStatsChangeRef.current = onRoundStatsChange;
@@ -209,6 +220,7 @@ export default function SanctuaryGameCanvas({
     const kodamaTexture = loadKodamaGhostTexture(maxAniso);
     const mistTexture = createMistTexture();
     const crimsonAuraTexture = createCrimsonAuraTexture();
+    const diamondAuraTexture = createDiamondAuraTexture();
     const forestGroundTexture = createForestGroundTexture();
 
     // Forest moss clearing floor
@@ -265,7 +277,7 @@ export default function SanctuaryGameCanvas({
 
     // Foreground Customized Warrior & Bow facing the Grass Wall (-Z)
     const warrior = new WarriorCharacter3D(maxAniso);
-    warrior.rebuild(gender, customizationRef.current, { playerLevel: playerLevelRef.current });
+    warrior.rebuild(genderRef.current, customizationRef.current, { playerLevel: playerLevelRef.current });
     warrior.root.position.set(0, 0, 2.2);
     warrior.root.rotation.y = Math.PI;
     scene.add(warrior.root);
@@ -313,6 +325,7 @@ export default function SanctuaryGameCanvas({
     scene.add(burstRing);
 
     const keys = new Set<string>();
+    keysRef.current = keys;
     const raycaster = new THREE.Raycaster();
     const pointerNdc = new THREE.Vector2();
     const wallAimPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 5.6); // z = -5.6
@@ -320,14 +333,28 @@ export default function SanctuaryGameCanvas({
     let burstProgress = -1;
     let arrowsFired = 0;
 
+    // Start background supernatural forest audio cleanly
+    if (!pausedRef.current) {
+      sanctuaryAudio.ensureStarted();
+    }
+    const unsubscribeAudio = sanctuaryAudio.subscribe((audioState) => {
+      container.dataset.audioState = audioState;
+    });
+
     // Kodama Round State
     const ghostRoot = new THREE.Group();
     scene.add(ghostRoot);
+
+    const makeRunInstanceId = () =>
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID().slice(0, 8)
+        : Math.random().toString(36).slice(2, 10);
 
     const roundState: RoundEngineState = {
       round: roundPropRef.current.round,
       stage: roundPropRef.current.stage,
       runKey: roundPropRef.current.roundRunKey,
+      runInstanceId: makeRunInstanceId(),
       plan: buildRoundSpawnPlan(roundPropRef.current.round, roundPropRef.current.stage),
       spawnIndex: 0,
       spawnTimer: 0.35,
@@ -377,6 +404,7 @@ export default function SanctuaryGameCanvas({
     };
 
     const resetRoundEngine = (nextRound: number, nextStage: 1 | 2, nextRunKey: number) => {
+      keys.clear();
       for (const g of roundState.activeGhosts) {
         disposeGhostRig(g.rig);
       }
@@ -389,6 +417,7 @@ export default function SanctuaryGameCanvas({
       roundState.round = nextRound;
       roundState.stage = nextStage;
       roundState.runKey = nextRunKey;
+      roundState.runInstanceId = makeRunInstanceId();
       roundState.plan = buildRoundSpawnPlan(nextRound, nextStage);
       roundState.spawnIndex = 0;
       roundState.spawnTimer = 0.35;
@@ -404,7 +433,7 @@ export default function SanctuaryGameCanvas({
       const rig = createKodamaGhostRig(
         spec.id,
         kodamaTexture,
-        crimsonAuraTexture,
+        spec.kind === 'crossing' ? diamondAuraTexture : crimsonAuraTexture,
         ghostBodyGeo,
         ghostAuraGeo,
         ghostEyeGeo,
@@ -516,9 +545,12 @@ export default function SanctuaryGameCanvas({
       arrowsFired += 1;
       container.dataset.arrowsFired = String(arrowsFired);
       warrior.triggerFlourish();
+      sanctuaryAudio.playArrowShot();
     };
 
     const triggerAction = (clientX?: number, clientY?: number) => {
+      if (pausedRef.current) return;
+      sanctuaryAudio.ensureStarted();
       const lvl = playerLevelRef.current;
       let activity = activeActivityRef.current;
 
@@ -554,7 +586,11 @@ export default function SanctuaryGameCanvas({
             ghost.phase = 'dissolving';
             ghost.phaseTime = 0;
             roundState.hits += 1;
-            onKodamaHitRef.current?.();
+            sanctuaryAudio.playGhostHit(ghost.spec.kind === 'crossing');
+            onKodamaHitRef.current?.(
+              ghost.spec.kind,
+              `${roundState.runInstanceId}:${ghost.spec.id}`,
+            );
             onActivityHitRef.current?.('sword_combat');
             syncRoundHud();
           }
@@ -581,7 +617,11 @@ export default function SanctuaryGameCanvas({
             ghost.phase = 'dissolving';
             ghost.phaseTime = 0;
             roundState.hits += 1;
-            onKodamaHitRef.current?.();
+            sanctuaryAudio.playGhostHit(ghost.spec.kind === 'crossing');
+            onKodamaHitRef.current?.(
+              ghost.spec.kind,
+              `${roundState.runInstanceId}:${ghost.spec.id}`,
+            );
             onActivityHitRef.current?.('superpower_burst');
             syncRoundHud();
           }
@@ -590,6 +630,8 @@ export default function SanctuaryGameCanvas({
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
+      if (pausedRef.current) return;
+      sanctuaryAudio.ensureStarted();
       keys.add(e.code);
       const lvl = playerLevelRef.current;
 
@@ -649,9 +691,13 @@ export default function SanctuaryGameCanvas({
     const onKeyUp = (e: KeyboardEvent) => keys.delete(e.code);
     const onBlur = () => keys.clear();
     const onMouseMove = (e: MouseEvent) => {
+      if (pausedRef.current) return;
       resolveAimPoint(e.clientX, e.clientY);
     };
-    const onCanvasClick = (e: MouseEvent) => triggerAction(e.clientX, e.clientY);
+    const onCanvasClick = (e: MouseEvent) => {
+      if (pausedRef.current) return;
+      triggerAction(e.clientX, e.clientY);
+    };
 
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
@@ -674,6 +720,7 @@ export default function SanctuaryGameCanvas({
     let frameId = 0;
     const startMs = performance.now();
     let lastMs = startMs;
+    let simElapsed = 0;
     const moveVec = new THREE.Vector3();
     const desiredCamPos = new THREE.Vector3();
     const lookTarget = new THREE.Vector3();
@@ -712,235 +759,278 @@ export default function SanctuaryGameCanvas({
       if (disposed) return;
       const now = performance.now();
       const rawDt = (now - lastMs) / 1000;
-      const dt = Math.min(rawDt, 0.05);
-      const simDt = Math.min(rawDt, 0.14);
       lastMs = now;
-      const elapsed = (now - startMs) / 1000;
 
-      // Foreground Warrior Movement (kept cleanly in front of the Grass Wall)
-      moveVec.set(0, 0, 0);
-      if (keys.has('KeyW') || keys.has('ArrowUp')) moveVec.z -= 1;
-      if (keys.has('KeyS') || keys.has('ArrowDown')) moveVec.z += 1;
-      if (keys.has('KeyA') || keys.has('ArrowLeft')) moveVec.x -= 1;
-      if (keys.has('KeyD') || keys.has('ArrowRight')) moveVec.x += 1;
+      if (!pausedRef.current) {
+        const dt = Math.min(rawDt, 0.05);
+        const simDt = Math.min(rawDt, 0.14);
+        simElapsed += dt;
 
-      if (moveVec.lengthSq() > 0) {
-        moveVec.normalize();
-        const talismanBoost =
-          talismanActiveRef.current &&
-          isGadgetUnlocked(playerLevelRef.current, 'spirit_talisman')
-            ? 5.8
-            : 4.0;
-        warrior.root.position.x = THREE.MathUtils.clamp(
-          warrior.root.position.x + moveVec.x * talismanBoost * dt,
-          -6.5,
-          6.5,
-        );
-        warrior.root.position.z = THREE.MathUtils.clamp(
-          warrior.root.position.z + moveVec.z * talismanBoost * dt,
-          0.4,
-          4.0,
-        );
-        const targetAngle = Math.atan2(moveVec.x, moveVec.z);
-        let diff = targetAngle - warrior.root.rotation.y;
-        while (diff > Math.PI) diff -= Math.PI * 2;
-        while (diff < -Math.PI) diff += Math.PI * 2;
-        warrior.root.rotation.y += diff * (1 - Math.exp(-10 * dt));
-      }
+        // Foreground Warrior Movement (kept cleanly in front of the Grass Wall)
+        moveVec.set(0, 0, 0);
+        if (keys.has('KeyW') || keys.has('ArrowUp')) moveVec.z -= 1;
+        if (keys.has('KeyS') || keys.has('ArrowDown')) moveVec.z += 1;
+        if (keys.has('KeyA') || keys.has('ArrowLeft')) moveVec.x -= 1;
+        if (keys.has('KeyD') || keys.has('ArrowRight')) moveVec.x += 1;
 
-      // Subtle atmospheric drift on mist planes & crimson lighting
-      for (const mist of mistPlanes) {
-        mist.mesh.position.x = mist.baseX + Math.sin(elapsed * mist.speed + mist.phase) * 0.9;
-      }
-      crimsonWallLightLeft.intensity = 3.8 + Math.sin(elapsed * 2.1) * 0.65;
-      crimsonWallLightRight.intensity = 3.8 + Math.cos(elapsed * 1.9) * 0.65;
-
-      // Spawn Kodama Ghosts dynamically (staggered, never all simultaneously)
-      const roundCfg = getRoundConfig(roundState.round);
-      let hudDirty = false;
-      if (!roundState.finished && roundState.spawnIndex < roundState.plan.length) {
-        roundState.spawnTimer -= simDt;
-        const activeNonDissolving = roundState.activeGhosts.filter(
-          (g) => g.phase !== 'dissolving',
-        ).length;
-        if (roundState.spawnTimer <= 0 && activeNonDissolving < roundCfg.maxConcurrent) {
-          const nextSpec = roundState.plan[roundState.spawnIndex];
-          spawnNextGhost(nextSpec);
-          roundState.spawnIndex += 1;
-          const following = roundState.plan[roundState.spawnIndex];
-          roundState.spawnTimer = following ? following.delayAfterPrevious : 0.5;
-          hudDirty = true;
-        }
-      }
-
-      // Advance Active Kodama Ghosts (Fade-in, Hover / Sudden Crossing, Fade-out, Dissolve)
-      for (let i = roundState.activeGhosts.length - 1; i >= 0; i--) {
-        const ghost = roundState.activeGhosts[i];
-        ghost.phaseTime += simDt;
-
-        if (ghost.phase === 'fading_in') {
-          const p = Math.min(1, ghost.phaseTime / ghost.spec.fadeDuration);
-          ghost.opacity = p;
-          if (ghost.spec.kind === 'wall') {
-            ghost.worldZ = ghost.spec.z + p * 0.4;
-          }
-          if (p >= 1) {
-            ghost.phase = 'visible';
-            ghost.phaseTime = 0;
-          }
-        } else if (ghost.phase === 'visible') {
-          ghost.opacity = 1;
-          if (ghost.spec.kind === 'crossing') {
-            const travelProgress = Math.min(1, ghost.phaseTime / ghost.spec.visibleDuration);
-            ghost.worldX = THREE.MathUtils.lerp(
-              ghost.spec.startX,
-              ghost.spec.endX,
-              travelProgress,
-            );
-            ghost.worldY =
-              ghost.spec.y +
-              Math.sin(elapsed * 4.2 + ghost.spec.bobPhase) * ghost.spec.swayAmp;
-          } else {
-            ghost.worldX =
-              ghost.spec.x +
-              Math.sin(elapsed * 1.9 + ghost.spec.bobPhase) * ghost.spec.swayAmp;
-            ghost.worldY =
-              ghost.spec.y +
-              Math.cos(elapsed * 2.4 + ghost.spec.bobPhase) * (ghost.spec.swayAmp * 0.65);
-          }
-          if (ghost.phaseTime >= ghost.spec.visibleDuration) {
-            ghost.phase = 'fading_out';
-            ghost.phaseTime = 0;
-          }
-        } else if (ghost.phase === 'fading_out') {
-          const p = Math.min(1, ghost.phaseTime / ghost.spec.fadeDuration);
-          ghost.opacity = Math.max(0, 1 - p);
-          if (ghost.spec.kind === 'crossing') {
-            const dirSign = ghost.spec.endX >= ghost.spec.startX ? 1 : -1;
-            ghost.worldX += dirSign * ghost.spec.speed * simDt * 0.55;
-          }
-          if (p >= 1) {
-            ghost.active = false;
-            ghost.phase = 'gone';
-            disposeGhostRig(ghost.rig);
-            roundState.activeGhosts.splice(i, 1);
-            hudDirty = true;
-            continue;
-          }
-        } else if (ghost.phase === 'dissolving') {
-          const p = Math.min(1, ghost.phaseTime / 0.28);
-          ghost.opacity = Math.max(0, 1 - p);
-          ghost.rig.group.scale.setScalar(1 + p * 0.35);
-          if (p >= 1) {
-            ghost.phase = 'gone';
-            disposeGhostRig(ghost.rig);
-            roundState.activeGhosts.splice(i, 1);
-            hudDirty = true;
-            continue;
-          }
-        }
-
-        ghost.rig.group.position.set(ghost.worldX, ghost.worldY, ghost.worldZ);
-        ghost.rig.bodyMat.opacity = ghost.opacity;
-        ghost.rig.auraMat.opacity = ghost.opacity * (ghost.spec.kind === 'crossing' ? 0.55 : 0.36);
-        const eyePulse = 0.8 + Math.sin(elapsed * 7 + ghost.spec.bobPhase) * 0.2;
-        ghost.rig.eyeLeftMat.opacity = ghost.opacity * eyePulse;
-        ghost.rig.eyeRightMat.opacity = ghost.opacity * eyePulse;
-      }
-
-      // Check Round Completion (once all planned ghosts spawned & cleared)
-      if (
-        !roundState.finished &&
-        roundState.spawnIndex >= roundState.plan.length &&
-        roundState.activeGhosts.length === 0
-      ) {
-        roundState.finished = true;
-        hudDirty = true;
-        const outcome = evaluateRoundOutcome(
-          roundState.round,
-          roundState.hits,
-          roundState.plan.length,
-        );
-        onRoundFinishedRef.current?.(outcome);
-      }
-
-      // Advance Arrows & Continuous Swept-Segment Collision Against Kodama Ghosts (prevents tunneling)
-      for (let i = arrows.length - 1; i >= 0; i--) {
-        const arrow = arrows[i];
-        prevArrowPos.copy(arrow.mesh.position);
-        arrow.mesh.position.addScaledVector(arrow.velocity, simDt);
-        arrow.life -= simDt;
-
-        segVec.copy(arrow.mesh.position).sub(prevArrowPos);
-        const segLenSq = Math.max(0.0001, segVec.lengthSq());
-
-        let hitGhost = false;
-        for (const ghost of roundState.activeGhosts) {
-          if (!shouldAwardGhostHit(ghost)) continue;
-          toGhost.set(
-            ghost.worldX - prevArrowPos.x,
-            ghost.worldY - prevArrowPos.y,
-            ghost.worldZ - prevArrowPos.z,
+        if (moveVec.lengthSq() > 0) {
+          moveVec.normalize();
+          const talismanBoost =
+            talismanActiveRef.current &&
+            isGadgetUnlocked(playerLevelRef.current, 'spirit_talisman')
+              ? 5.8
+              : 4.0;
+          warrior.root.position.x = THREE.MathUtils.clamp(
+            warrior.root.position.x + moveVec.x * talismanBoost * dt,
+            -6.5,
+            6.5,
           );
-          const t = THREE.MathUtils.clamp(toGhost.dot(segVec) / segLenSq, 0, 1);
-          closestPt.copy(prevArrowPos).addScaledVector(segVec, t);
+          warrior.root.position.z = THREE.MathUtils.clamp(
+            warrior.root.position.z + moveVec.z * talismanBoost * dt,
+            0.4,
+            4.0,
+          );
+          const targetAngle = Math.atan2(moveVec.x, moveVec.z);
+          let diff = targetAngle - warrior.root.rotation.y;
+          while (diff > Math.PI) diff -= Math.PI * 2;
+          while (diff < -Math.PI) diff += Math.PI * 2;
+          warrior.root.rotation.y += diff * (1 - Math.exp(-10 * dt));
+        }
 
-          const dx = Math.abs(closestPt.x - ghost.worldX);
-          const dy = Math.abs(closestPt.y - ghost.worldY);
-          const dz = Math.abs(closestPt.z - ghost.worldZ);
+        // Subtle atmospheric drift on mist planes & crimson lighting
+        for (const mist of mistPlanes) {
+          mist.mesh.position.x = mist.baseX + Math.sin(simElapsed * mist.speed + mist.phase) * 0.9;
+        }
+        crimsonWallLightLeft.intensity = 3.8 + Math.sin(simElapsed * 2.1) * 0.65;
+        crimsonWallLightRight.intensity = 3.8 + Math.cos(simElapsed * 1.9) * 0.65;
 
-          if (dx < 0.85 && dy < 1.08 && dz < 0.95) {
-            ghost.hitAwarded = true;
-            ghost.active = false;
-            ghost.phase = 'dissolving';
-            ghost.phaseTime = 0;
-
-            roundState.hits += 1;
+        // Spawn Kodama Ghosts dynamically (staggered, never all simultaneously)
+        const roundCfg = getRoundConfig(roundState.round);
+        let hudDirty = false;
+        if (!roundState.finished && roundState.spawnIndex < roundState.plan.length) {
+          roundState.spawnTimer -= simDt;
+          const activeNonDissolving = roundState.activeGhosts.filter(
+            (g) => g.phase !== 'dissolving',
+          ).length;
+          if (roundState.spawnTimer <= 0 && activeNonDissolving < roundCfg.maxConcurrent) {
+            const nextSpec = roundState.plan[roundState.spawnIndex];
+            spawnNextGhost(nextSpec);
+            roundState.spawnIndex += 1;
+            const following = roundState.plan[roundState.spawnIndex];
+            roundState.spawnTimer = following ? following.delayAfterPrevious : 0.5;
             hudDirty = true;
-
-            burstMat.color.set('#38bdf8');
-            burstProgress = 0;
-            burstRing.position.set(ghost.worldX, ghost.worldY + 0.1, ghost.worldZ + 0.15);
-
-            hitGhost = true;
-            onKodamaHitRef.current?.();
-            break;
           }
         }
 
-        if (hitGhost || arrow.life <= 0 || arrow.mesh.position.z < -7.2) {
-          scene.remove(arrow.mesh);
-          arrows.splice(i, 1);
+        // Advance Active Kodama Ghosts (Fade-in, Progressive Motion Patterns, Fade-out, Dissolve)
+        for (let i = roundState.activeGhosts.length - 1; i >= 0; i--) {
+          const ghost = roundState.activeGhosts[i];
+          ghost.phaseTime += simDt;
+
+          if (ghost.phase === 'fading_in') {
+            const p = Math.min(1, ghost.phaseTime / ghost.spec.fadeDuration);
+            ghost.opacity = p;
+            if (ghost.spec.kind === 'wall') {
+              ghost.worldZ = ghost.spec.z + p * 0.4;
+            }
+            if (p >= 1) {
+              ghost.phase = 'visible';
+              ghost.phaseTime = 0;
+            }
+          } else if (ghost.phase === 'visible') {
+            ghost.opacity = 1;
+            const freq = ghost.spec.motionFreq;
+            if (ghost.spec.kind === 'crossing') {
+              const rawProgress = Math.min(1, ghost.phaseTime / ghost.spec.visibleDuration);
+              let progress = rawProgress;
+              let yOffset = Math.sin(simElapsed * 4.0 + ghost.spec.bobPhase) * ghost.spec.swayAmp;
+
+              if (ghost.spec.motionPattern === 'wave') {
+                yOffset =
+                  Math.sin(rawProgress * Math.PI * 3.0 + ghost.spec.bobPhase) *
+                  (ghost.spec.swayAmp * 1.45);
+              } else if (ghost.spec.motionPattern === 'arc') {
+                yOffset =
+                  Math.sin(rawProgress * Math.PI) * (ghost.spec.swayAmp * 1.8) -
+                  ghost.spec.swayAmp * 0.45;
+              } else if (ghost.spec.motionPattern === 'zigzag') {
+                progress = THREE.MathUtils.clamp(
+                  rawProgress + Math.sin(rawProgress * Math.PI * 4.0) * 0.045,
+                  0,
+                  1,
+                );
+                yOffset =
+                  Math.sin(rawProgress * Math.PI * 5.0 + ghost.spec.bobPhase) *
+                  (ghost.spec.swayAmp * 1.55);
+              }
+
+              ghost.worldX = THREE.MathUtils.lerp(ghost.spec.startX, ghost.spec.endX, progress);
+              ghost.worldY = THREE.MathUtils.clamp(ghost.spec.y + yOffset, 1.15, 4.15);
+            } else {
+              let dx = Math.sin(simElapsed * freq + ghost.spec.bobPhase) * ghost.spec.swayAmp;
+              let dy =
+                Math.cos(simElapsed * (freq * 1.2) + ghost.spec.bobPhase) *
+                (ghost.spec.swayAmp * 0.65);
+
+              if (ghost.spec.motionPattern === 'drift') {
+                dx =
+                  Math.sin(ghost.phaseTime * freq * 1.15 + ghost.spec.bobPhase) *
+                  (ghost.spec.swayAmp * 1.45);
+                dy =
+                  Math.sin(ghost.phaseTime * freq * 0.85 + ghost.spec.bobPhase * 1.3) *
+                  (ghost.spec.swayAmp * 0.85);
+              } else if (ghost.spec.motionPattern === 'zigzag') {
+                dx =
+                  (Math.sin(ghost.phaseTime * freq * 1.45 + ghost.spec.bobPhase) +
+                    0.45 * Math.sin(ghost.phaseTime * freq * 2.9)) *
+                  ghost.spec.swayAmp;
+                dy =
+                  Math.cos(ghost.phaseTime * freq * 2.1 + ghost.spec.bobPhase) *
+                  (ghost.spec.swayAmp * 0.72);
+              }
+
+              ghost.worldX = THREE.MathUtils.clamp(ghost.spec.x + dx, -6.35, 6.35);
+              ghost.worldY = THREE.MathUtils.clamp(ghost.spec.y + dy, 1.15, 4.05);
+            }
+            if (ghost.phaseTime >= ghost.spec.visibleDuration) {
+              ghost.phase = 'fading_out';
+              ghost.phaseTime = 0;
+            }
+          } else if (ghost.phase === 'fading_out') {
+            const p = Math.min(1, ghost.phaseTime / ghost.spec.fadeDuration);
+            ghost.opacity = Math.max(0, 1 - p);
+            if (ghost.spec.kind === 'crossing') {
+              const dirSign = ghost.spec.endX >= ghost.spec.startX ? 1 : -1;
+              ghost.worldX += dirSign * ghost.spec.speed * simDt * 0.55;
+            }
+            if (p >= 1) {
+              ghost.active = false;
+              ghost.phase = 'gone';
+              disposeGhostRig(ghost.rig);
+              roundState.activeGhosts.splice(i, 1);
+              hudDirty = true;
+              continue;
+            }
+          } else if (ghost.phase === 'dissolving') {
+            const p = Math.min(1, ghost.phaseTime / 0.28);
+            ghost.opacity = Math.max(0, 1 - p);
+            ghost.rig.group.scale.setScalar(1 + p * 0.35);
+            if (p >= 1) {
+              ghost.phase = 'gone';
+              disposeGhostRig(ghost.rig);
+              roundState.activeGhosts.splice(i, 1);
+              hudDirty = true;
+              continue;
+            }
+          }
+
+          ghost.rig.group.position.set(ghost.worldX, ghost.worldY, ghost.worldZ);
+          ghost.rig.bodyMat.opacity = ghost.opacity;
+          ghost.rig.auraMat.opacity =
+            ghost.opacity * (ghost.spec.kind === 'crossing' ? 0.62 : 0.36);
+          const eyePulse = 0.8 + Math.sin(simElapsed * 7 + ghost.spec.bobPhase) * 0.2;
+          ghost.rig.eyeLeftMat.opacity = ghost.opacity * eyePulse;
+          ghost.rig.eyeRightMat.opacity = ghost.opacity * eyePulse;
         }
-      }
 
-      if (hudDirty) {
-        syncRoundHud();
-      }
-
-      // Burst shockwave animation
-      if (burstProgress >= 0) {
-        burstProgress += simDt * 2.8;
-        const scale = 1 + burstProgress * 5.2;
-        burstRing.scale.setScalar(scale);
-        burstMat.opacity = Math.max(0, 1 - burstProgress);
-        if (burstProgress >= 1) {
-          burstProgress = -1;
-          burstMat.opacity = 0;
+        // Check Round Completion (once all planned ghosts spawned & cleared)
+        if (
+          !roundState.finished &&
+          roundState.spawnIndex >= roundState.plan.length &&
+          roundState.activeGhosts.length === 0
+        ) {
+          roundState.finished = true;
+          hudDirty = true;
+          const outcome = evaluateRoundOutcome(
+            roundState.round,
+            roundState.hits,
+            roundState.plan.length,
+          );
+          onRoundFinishedRef.current?.(outcome);
         }
+
+        // Advance Arrows & Continuous Swept-Segment Collision Against Kodama Ghosts (prevents tunneling)
+        for (let i = arrows.length - 1; i >= 0; i--) {
+          const arrow = arrows[i];
+          prevArrowPos.copy(arrow.mesh.position);
+          arrow.mesh.position.addScaledVector(arrow.velocity, simDt);
+          arrow.life -= simDt;
+
+          segVec.copy(arrow.mesh.position).sub(prevArrowPos);
+          const segLenSq = Math.max(0.0001, segVec.lengthSq());
+
+          let hitGhost = false;
+          for (const ghost of roundState.activeGhosts) {
+            if (!shouldAwardGhostHit(ghost)) continue;
+            toGhost.set(
+              ghost.worldX - prevArrowPos.x,
+              ghost.worldY - prevArrowPos.y,
+              ghost.worldZ - prevArrowPos.z,
+            );
+            const t = THREE.MathUtils.clamp(toGhost.dot(segVec) / segLenSq, 0, 1);
+            closestPt.copy(prevArrowPos).addScaledVector(segVec, t);
+
+            const dx = Math.abs(closestPt.x - ghost.worldX);
+            const dy = Math.abs(closestPt.y - ghost.worldY);
+            const dz = Math.abs(closestPt.z - ghost.worldZ);
+
+            if (dx < 0.85 && dy < 1.08 && dz < 0.95) {
+              ghost.hitAwarded = true;
+              ghost.active = false;
+              ghost.phase = 'dissolving';
+              ghost.phaseTime = 0;
+
+              roundState.hits += 1;
+              hudDirty = true;
+
+              burstMat.color.set(ghost.spec.kind === 'crossing' ? '#22d3ee' : '#fb7185');
+              burstProgress = 0;
+              burstRing.position.set(ghost.worldX, ghost.worldY + 0.1, ghost.worldZ + 0.15);
+
+              hitGhost = true;
+              sanctuaryAudio.playGhostHit(ghost.spec.kind === 'crossing');
+              onKodamaHitRef.current?.(
+                ghost.spec.kind,
+                `${roundState.runInstanceId}:${ghost.spec.id}`,
+              );
+              break;
+            }
+          }
+
+          if (hitGhost || arrow.life <= 0 || arrow.mesh.position.z < -7.2) {
+            scene.remove(arrow.mesh);
+            arrows.splice(i, 1);
+          }
+        }
+
+        if (hudDirty) {
+          syncRoundHud();
+        }
+
+        // Burst shockwave animation
+        if (burstProgress >= 0) {
+          burstProgress += simDt * 2.8;
+          const scale = 1 + burstProgress * 5.2;
+          burstRing.scale.setScalar(scale);
+          burstMat.opacity = Math.max(0, 1 - burstProgress);
+          if (burstProgress >= 1) {
+            burstProgress = -1;
+            burstMat.opacity = 0;
+          }
+        }
+
+        warrior.update(simElapsed, dt);
+
+        // Frame BOTH the foreground customized warrior+bow AND the towering Grass Wall + Kodama ghosts
+        desiredCamPos.set(
+          warrior.root.position.x * 0.48,
+          2.05,
+          warrior.root.position.z + 4.1,
+        );
+        camera.position.lerp(desiredCamPos, 1 - Math.exp(-6 * dt));
+        lookTarget.set(warrior.root.position.x * 0.35, 2.08, -2.6);
+        camera.lookAt(lookTarget);
       }
-
-      warrior.update(elapsed, dt);
-
-      // Frame BOTH the foreground customized warrior+bow AND the towering Grass Wall + Kodama ghosts
-      desiredCamPos.set(
-        warrior.root.position.x * 0.48,
-        2.05,
-        warrior.root.position.z + 4.1,
-      );
-      camera.position.lerp(desiredCamPos, 1 - Math.exp(-6 * dt));
-      lookTarget.set(warrior.root.position.x * 0.35, 2.08, -2.6);
-      camera.lookAt(lookTarget);
 
       renderer.render(scene, camera);
       if (isSoftwareGl) {
@@ -954,7 +1044,10 @@ export default function SanctuaryGameCanvas({
 
     return () => {
       disposed = true;
+      keysRef.current = null;
       resetRoundTriggerRef.current = null;
+      unsubscribeAudio();
+      sanctuaryAudio.stop();
       cancelAnimationFrame(frameId);
       clearTimeout(frameId);
       window.removeEventListener('keydown', onKeyDown);
@@ -985,6 +1078,7 @@ export default function SanctuaryGameCanvas({
       kodamaTexture.dispose();
       mistTexture.dispose();
       crimsonAuraTexture.dispose();
+      diamondAuraTexture.dispose();
       mistGeo.dispose();
       for (const mm of mistMats) mm.dispose();
       burstGeo.dispose();
@@ -996,7 +1090,22 @@ export default function SanctuaryGameCanvas({
       }
       warriorRef.current = null;
     };
-  }, [gender]);
+  }, []);
+
+  // Freeze inputs and pause/resume soundtrack cleanly when paused toggles
+  useEffect(() => {
+    const container = mountRef.current;
+    if (paused) {
+      keysRef.current?.clear();
+      sanctuaryAudio.pause();
+    } else {
+      sanctuaryAudio.resume();
+    }
+    if (container) {
+      container.dataset.paused = paused ? 'true' : 'false';
+      container.dataset.audioState = sanctuaryAudio.getState();
+    }
+  }, [paused]);
 
   // Restart/switch round cleanly when round, stage, or roundRunKey changes
   useEffect(() => {
@@ -1018,6 +1127,7 @@ export default function SanctuaryGameCanvas({
       data-activity={activeActivity}
       data-round={round}
       data-stage={stage}
+      data-paused={paused ? 'true' : 'false'}
       className="h-full w-full cursor-crosshair"
     />
   );

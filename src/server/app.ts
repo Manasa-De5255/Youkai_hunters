@@ -1,4 +1,5 @@
 import express, { Express, NextFunction, Request, Response } from 'express';
+import { KodamaSpawnKind } from '../data/kodamaChallenge';
 import { ActivityId, Gender } from '../types/game';
 import { getDatabaseStore, resolvePostgresConnectionString, YokaiStore } from './store';
 
@@ -187,6 +188,7 @@ export function createApiApp(options?: { store?: YokaiStore }): Express {
     '/api/auth/register',
     asyncRoute(async (req, res, store) => {
       const {
+        email,
         username,
         playerId,
         password,
@@ -196,13 +198,14 @@ export function createApiApp(options?: { store?: YokaiStore }): Express {
         recoveryAnswer,
       } = req.body ?? {};
       const result = await store.registerPlayer({
-        username: String(username ?? ''),
+        email: typeof email === 'string' ? email : undefined,
+        username: typeof username === 'string' ? username : undefined,
         playerId: typeof playerId === 'string' ? playerId : undefined,
         password: String(password ?? ''),
         confirmPassword: String(confirmPassword ?? ''),
-        gender: gender as Gender,
+        gender: gender as Gender | undefined,
         recoveryQuestion: typeof recoveryQuestion === 'string' ? recoveryQuestion : undefined,
-        recoveryAnswer: String(recoveryAnswer ?? ''),
+        recoveryAnswer: typeof recoveryAnswer === 'string' ? recoveryAnswer : undefined,
       });
 
       if (!result.ok) {
@@ -218,9 +221,10 @@ export function createApiApp(options?: { store?: YokaiStore }): Express {
   app.post(
     '/api/auth/login',
     asyncRoute(async (req, res, store) => {
-      const { username, playerId, password } = req.body ?? {};
+      const { email, username, playerId, password } = req.body ?? {};
       const result = await store.loginPlayer({
-        username: String(username ?? ''),
+        email: typeof email === 'string' ? email : undefined,
+        username: typeof username === 'string' ? username : undefined,
         playerId: typeof playerId === 'string' ? playerId : undefined,
         password: typeof password === 'string' ? password : '',
       });
@@ -298,6 +302,25 @@ export function createApiApp(options?: { store?: YokaiStore }): Express {
   );
 
   app.put(
+    '/api/player/profile',
+    asyncRoute(async (req, res, store) => {
+      const { player } = await getAuthenticatedPlayer(req, store);
+      if (!player) {
+        res.status(401).json({ error: 'Not authenticated.' });
+        return;
+      }
+      const username = String(req.body?.username ?? '');
+      const gender = req.body?.gender as Gender;
+      const result = await store.updatePlayerProfile(player.playerId, { username, gender });
+      if (!result.ok) {
+        res.status(result.status).json({ error: result.error });
+        return;
+      }
+      res.json({ player: result.player });
+    }),
+  );
+
+  app.put(
     '/api/player/customization',
     asyncRoute(async (req, res, store) => {
       const { player } = await getAuthenticatedPlayer(req, store);
@@ -346,7 +369,9 @@ export function createApiApp(options?: { store?: YokaiStore }): Express {
         res.status(401).json({ error: 'Not authenticated.' });
         return;
       }
-      const result = await store.awardKodamaHit(player.playerId);
+      const kind: KodamaSpawnKind = req.body?.kind === 'crossing' ? 'crossing' : 'wall';
+      const ghostKey = typeof req.body?.ghostKey === 'string' ? req.body.ghostKey : undefined;
+      const result = await store.awardKodamaHit(player.playerId, kind, ghostKey);
       if (!result.ok) {
         res.status(result.status).json({ error: result.error });
         return;
@@ -355,6 +380,8 @@ export function createApiApp(options?: { store?: YokaiStore }): Express {
         player: result.player,
         leveledUp: result.leveledUp,
         newlyUnlocked: result.newlyUnlocked,
+        diamondAwarded: result.diamondAwarded,
+        alreadyRewarded: result.alreadyRewarded,
       });
     }),
   );

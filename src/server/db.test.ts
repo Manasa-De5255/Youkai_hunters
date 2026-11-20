@@ -166,29 +166,58 @@ test('YokaiDatabase supports registration + login via Username & Player ID, isol
       assert.equal(newLogin.player.level, 2);
     }
 
-    // 7. Kodama Archery Challenge diamonds, round pass/fail, and Stage 2 unlock per player
-    for (let i = 0; i < 6; i++) {
-      const kh = db.awardKodamaHit(regA.player.playerId);
+    // 7. Kodama Archery Challenge diamonds (0 for wall, 1 for crossing), ghostKey deduplication, round pass/fail, and Stage 2 unlock
+    for (let i = 0; i < 4; i++) {
+      const kh = db.awardKodamaHit(regA.player.playerId, 'wall', `run1:wall-${i}`);
       assert.equal(kh.ok, true);
+      if (kh.ok) {
+        assert.equal(kh.diamondAwarded, 0);
+        assert.equal(kh.player.kodamaProgress.diamonds, 0);
+      }
     }
+    const specialHit = db.awardKodamaHit(regA.player.playerId, 'crossing', 'run1:crossing-1');
+    assert.equal(specialHit.ok, true);
+    if (specialHit.ok) {
+      assert.equal(specialHit.diamondAwarded, 1);
+      assert.equal(specialHit.alreadyRewarded, false);
+      assert.equal(specialHit.player.kodamaProgress.diamonds, 1);
+    }
+
+    // Duplicate ghostKey must NOT grant another diamond
+    const dupHit = db.awardKodamaHit(regA.player.playerId, 'crossing', 'run1:crossing-1');
+    assert.equal(dupHit.ok, true);
+    if (dupHit.ok) {
+      assert.equal(dupHit.diamondAwarded, 0);
+      assert.equal(dupHit.alreadyRewarded, true);
+      assert.equal(dupHit.player.kodamaProgress.diamonds, 1);
+    }
+
     const failRound = db.completeKodamaRound(regA.player.playerId, 1, 5);
     assert.equal(failRound.ok, true);
     if (failRound.ok) {
       assert.equal(failRound.passed, false);
-      assert.equal(failRound.player.kodamaProgress.diamonds, 6);
+      assert.equal(failRound.player.kodamaProgress.diamonds, 1);
       assert.deepEqual(failRound.player.kodamaProgress.completedRounds, []);
       assert.equal(failRound.player.kodamaProgress.stage2Unlocked, false);
     }
 
+    const roundMinHits = [6, 8, 10, 12];
     for (let r = 1; r <= 4; r++) {
-      const passR = db.completeKodamaRound(regA.player.playerId, r, 6);
+      const passR = db.completeKodamaRound(regA.player.playerId, r, roundMinHits[r - 1]);
       assert.equal(passR.ok, true);
       if (passR.ok) {
         assert.equal(passR.passed, true);
         assert.equal(passR.player.kodamaProgress.stage2Unlocked, false);
       }
     }
-    const passR5 = db.completeKodamaRound(regA.player.playerId, 5, 8);
+    const failR5 = db.completeKodamaRound(regA.player.playerId, 5, 13);
+    assert.equal(failR5.ok, true);
+    if (failR5.ok) {
+      assert.equal(failR5.passed, false);
+      assert.equal(failR5.player.kodamaProgress.stage2Unlocked, false);
+    }
+
+    const passR5 = db.completeKodamaRound(regA.player.playerId, 5, 14);
     assert.equal(passR5.ok, true);
     if (passR5.ok) {
       assert.equal(passR5.stage2JustUnlocked, true);
@@ -202,6 +231,80 @@ test('YokaiDatabase supports registration + login via Username & Player ID, isol
     assert.equal(bAfter.kodamaProgress.diamonds, 0);
     assert.deepEqual(bAfter.kodamaProgress.completedRounds, []);
     assert.equal(bAfter.kodamaProgress.stage2Unlocked, false);
+  } finally {
+    db.close();
+  }
+});
+
+test('YokaiDatabase supports Email registration, first-login profile setup, profile settings updates, and Email re-login', () => {
+  const db = new YokaiDatabase(':memory:');
+  try {
+    const reg = db.registerPlayer({
+      email: 'Kuro.Archer@Example.com',
+      password: 'Password123',
+      confirmPassword: 'Password123',
+    });
+    assert.equal(reg.ok, true);
+    if (!reg.ok) return;
+
+    assert.equal(reg.player.email, 'kuro.archer@example.com');
+    assert.equal(reg.player.profileCompleted, false);
+
+    // Register another player to verify player name conflict rejection on updatePlayerProfile
+    const other = db.registerPlayer({
+      email: 'taken@example.com',
+      password: 'Password123',
+      confirmPassword: 'Password123',
+    });
+    assert.equal(other.ok, true);
+    if (!other.ok) return;
+    db.updatePlayerProfile(other.player.playerId, { username: 'TakenName', gender: 'male' });
+
+    const conflict = db.updatePlayerProfile(reg.player.playerId, {
+      username: 'takenname',
+      gender: 'female',
+    });
+    assert.equal(conflict.ok, false);
+    if (!conflict.ok) assert.equal(conflict.status, 409);
+
+    // Complete first-login profile setup
+    const setup = db.updatePlayerProfile(reg.player.playerId, {
+      username: 'AoiShadow',
+      gender: 'female',
+    });
+    assert.equal(setup.ok, true);
+    if (!setup.ok) return;
+    assert.equal(setup.player.username, 'AoiShadow');
+    assert.equal(setup.player.gender, 'female');
+    assert.equal(setup.player.profileCompleted, true);
+
+    // Earn 1 diamond on a running ghost
+    const hit = db.awardKodamaHit(reg.player.playerId, 'crossing', 'runA:c1');
+    assert.equal(hit.ok, true);
+    if (hit.ok) assert.equal(hit.player.kodamaProgress.diamonds, 1);
+
+    // Re-login with email preserves profileCompleted=true, name, gender, and diamonds
+    const relogin = db.loginPlayer({
+      email: 'KURO.ARCHER@example.com',
+      password: 'Password123',
+    });
+    assert.equal(relogin.ok, true);
+    if (!relogin.ok) return;
+    assert.equal(relogin.player.profileCompleted, true);
+    assert.equal(relogin.player.username, 'AoiShadow');
+    assert.equal(relogin.player.gender, 'female');
+    assert.equal(relogin.player.kodamaProgress.diamonds, 1);
+
+    // Update name and gender later via profile settings
+    const edited = db.updatePlayerProfile(reg.player.playerId, {
+      username: 'KuroBlade',
+      gender: 'male',
+    });
+    assert.equal(edited.ok, true);
+    if (!edited.ok) return;
+    assert.equal(edited.player.username, 'KuroBlade');
+    assert.equal(edited.player.gender, 'male');
+    assert.equal(edited.player.kodamaProgress.diamonds, 1);
   } finally {
     db.close();
   }
